@@ -1,0 +1,33 @@
+# Secrets & credentials — NEVER commit
+.env
+.env.*
+!.env.example
+*.token
+*.secret
+*.key
+*.pem
+secrets/
+
+# Engine auth dirs (subscription OAuth tokens live here)
+.codex/
+.grok/
+.openclaw/
+
+# Local state / databases
+*.sqlite
+*.sqlite-*
+*.db
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Node
+node_modules/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

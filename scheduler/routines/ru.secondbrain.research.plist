@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  ru.secondbrain.research.plist — LaunchAgent routine RESEARCH (плановый web-research).
+
+  ШАБЛОН: замени __PUBLIC_REPO__ на абсолютный путь к репо personal-llm-wiki ПЕРЕД
+  установкой. Установка/снятие — см. scheduler/README.md и setup/SETUP.md.
+
+  ЧТО ДЕЛАЕТ: по расписанию (routine #4 каталога) движок `claude -p` берёт
+  пользовательские запросы из приватного research/queries.md, делает web-research
+  своими «руками» (web/computer-MCP — ADR-0008), пишет конспекты в wiki/research/
+  и шлёт краткий дайджест владельцу в Telegram. Нет запросов → выходит без спавна.
+
+  ПОЧЕМУ launchd-LaunchAgent (не Daemon): GUI-юзер → сеть + `claude login`-сессия
+  (ADR-0008/0009). web-research особенно выигрывает от remote Claude routine
+  (работает при спящем Mac, README.md) — но для v1 хватает локального LaunchAgent.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>ru.secondbrain.research</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>__PUBLIC_REPO__/scheduler/run_routine.sh</string>
+        <string>research</string>
+    </array>
+
+    <!-- Дважды в неделю: вторник и пятница (Weekday 2 и 5) в 09:00. launchd
+         поддерживает массив словарей StartCalendarInterval — по записи на день. -->
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict>
+            <key>Weekday</key>
+            <integer>2</integer>
+            <key>Hour</key>
+            <integer>9</integer>
+            <key>Minute</key>
+            <integer>0</integer>
+        </dict>
+        <dict>
+            <key>Weekday</key>
+            <integer>5</integer>
+            <key>Hour</key>
+            <integer>9</integer>
+            <key>Minute</key>
+            <integer>0</integer>
+        </dict>
+    </array>
+
+    <key>RunAtLoad</key>
+    <false/>
+    <key>KeepAlive</key>
+    <false/>
+
+    <key>WorkingDirectory</key>
+    <string>__PUBLIC_REPO__</string>
+
+    <key>StandardOutPath</key>
+    <string>__PUBLIC_REPO__/scheduler/research.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>__PUBLIC_REPO__/scheduler/research.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>LANG</key>
+        <string>en_US.UTF-8</string>
+    </dict>
+
+    <!-- web-research с несколькими запросами может идти долго — 30 мин. -->
+    <key>ExitTimeOut</key>
+    <integer>1800</integer>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>Nice</key>
+    <integer>5</integer>
+</dict>
+</plist>

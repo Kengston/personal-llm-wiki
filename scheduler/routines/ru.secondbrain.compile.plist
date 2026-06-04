@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  ru.secondbrain.compile.plist — LaunchAgent routine COMPILE (ночная компиляция).
+
+  ШАБЛОН: замени __PUBLIC_REPO__ на абсолютный путь к репо personal-llm-wiki ПЕРЕД
+  установкой. Установка/снятие — см. scheduler/README.md и setup/SETUP.md
+  (launchctl bootstrap gui/$(id -u) ...). НЕ запускать отсюда автоматически.
+
+  ЧТО ДЕЛАЕТ: раз в сутки ночью спавнит `claude -p` (через run_routine.sh compile)
+  и инкрементально компилирует новые источники из raw/ в страницы wiki/
+  (routine #1 каталога — scheduler/routines/README.md). Идемпотентно по watermark.
+
+  ПОЧЕМУ launchd-LaunchAgent (не Daemon): работает как залогиненный GUI-юзер →
+  есть сеть и доступ к `claude login`-сессии/keychain (ADR-0008/0009), sudo не нужен.
+  Альтернатива для 24/7 без бодрствующего Mac — remote Claude routine (README.md).
+
+  СОБЫТИЙНЫЙ ВАРИАНТ: ту же routine можно вешать на ПОЯВЛЕНИЕ файла в raw/ через
+  ключ WatchPaths (см. scheduler/routines/README.md, слой СОБЫТИЙНОЕ) — тогда
+  компиляция стартует сразу после ингеста, а не ждёт ночи.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>ru.secondbrain.compile</string>
+
+    <!-- Запускаем generic-обёртку с именем routine первым аргументом. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>__PUBLIC_REPO__/scheduler/run_routine.sh</string>
+        <string>compile</string>
+    </array>
+
+    <!-- Ночью в 03:30 локального времени (тихо, не мешает реактиву днём). -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>3</integer>
+        <key>Minute</key>
+        <integer>30</integer>
+    </dict>
+
+    <!-- СОБЫТИЙНЫЙ опцион (раскомментируй, чтобы компилировать при новом файле в raw/):
+    <key>WatchPaths</key>
+    <array>
+        <string>__CONTENT_ROOT__/raw</string>
+    </array>
+    -->
+
+    <!-- Компиляция — не интерактив, при login не нужна. -->
+    <key>RunAtLoad</key>
+    <false/>
+    <key>KeepAlive</key>
+    <false/>
+
+    <key>WorkingDirectory</key>
+    <string>__PUBLIC_REPO__</string>
+
+    <key>StandardOutPath</key>
+    <string>__PUBLIC_REPO__/scheduler/compile.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>__PUBLIC_REPO__/scheduler/compile.err.log</string>
+
+    <!-- CONTENT_ROOT/секреты подтянет run_routine.sh из приватного .env; здесь только PATH. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>LANG</key>
+        <string>en_US.UTF-8</string>
+    </dict>
+
+    <!-- Компиляция десятков страниц может быть дольше дайджеста — даём 30 мин. -->
+    <key>ExitTimeOut</key>
+    <integer>1800</integer>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>Nice</key>
+    <integer>5</integer>
+</dict>
+</plist>

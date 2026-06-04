@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  ru.secondbrain.resurface.plist — LaunchAgent routine RESURFACE (idea-resurfacing).
+
+  ШАБЛОН: замени __PUBLIC_REPO__ на абсолютный путь к репо personal-llm-wiki ПЕРЕД
+  установкой. Установка/снятие — см. scheduler/README.md и setup/SETUP.md.
+
+  ЧТО ДЕЛАЕТ: периодический мягкий nudge (routine #5 каталога) — движок `claude -p`
+  выбирает давно не тронутую идею из wiki/ideas/ и шлёт владельцу одну строку
+  «всплыла идея …, ещё актуальна?» в Telegram.
+
+  ВАЖНО: базовый механизм idea-resurfacing — записи kind=spaced в reminders.md
+  (лесенка Leitner [1,3,7,16,35]), которые уже всплывают через routine digest. Эта
+  отдельная routine — ДОПОЛНИТЕЛЬНЫЙ лёгкий слой для идей БЕЗ spaced-напоминания;
+  если spaced-механизма в digest достаточно, эту routine можно не устанавливать.
+
+  ПОЧЕМУ launchd-LaunchAgent (не Daemon): GUI-юзер → сеть + `claude login`-сессия
+  (ADR-0008/0009). 24/7-альтернатива — remote Claude routine (README.md).
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>ru.secondbrain.resurface</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>__PUBLIC_REPO__/scheduler/run_routine.sh</string>
+        <string>resurface</string>
+    </array>
+
+    <!-- Раз в неделю: суббота (Weekday 6) в 11:00 — спокойный «подумать» слот. -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Weekday</key>
+        <integer>6</integer>
+        <key>Hour</key>
+        <integer>11</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <false/>
+    <key>KeepAlive</key>
+    <false/>
+
+    <key>WorkingDirectory</key>
+    <string>__PUBLIC_REPO__</string>
+
+    <key>StandardOutPath</key>
+    <string>__PUBLIC_REPO__/scheduler/resurface.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>__PUBLIC_REPO__/scheduler/resurface.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>LANG</key>
+        <string>en_US.UTF-8</string>
+    </dict>
+
+    <key>ExitTimeOut</key>
+    <integer>300</integer>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>Nice</key>
+    <integer>5</integer>
+</dict>
+</plist>

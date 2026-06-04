@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  ru.secondbrain.lint.plist — LaunchAgent routine LINT (еженедельный аудит).
+
+  ШАБЛОН: замени __PUBLIC_REPO__ на абсолютный путь к репо personal-llm-wiki ПЕРЕД
+  установкой. Установка/снятие — см. scheduler/README.md и setup/SETUP.md.
+
+  ЧТО ДЕЛАЕТ: раз в неделю (routine #3 каталога) — (а) детерминированный PII/секрет-
+  скан публичного репо через scheduler.lint_public (он импортит ingest.sanitizer.
+  scan_secrets), (б) содержательный аудит ВИКИ движком `claude -p`: противоречия,
+  stale, orphans, битые ссылки → точечные правки + отчёт владельцу в Telegram.
+
+  ПОЧЕМУ launchd-LaunchAgent (не Daemon): GUI-юзер → сеть + `claude login`-сессия
+  (ADR-0008/0009), sudo не нужен. 24/7-альтернатива — remote Claude routine (README.md).
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>ru.secondbrain.lint</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>__PUBLIC_REPO__/scheduler/run_routine.sh</string>
+        <string>lint</string>
+    </array>
+
+    <!-- Еженедельно: воскресенье (Weekday 0) в 04:00 локального времени. -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Weekday</key>
+        <integer>0</integer>
+        <key>Hour</key>
+        <integer>4</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <false/>
+    <key>KeepAlive</key>
+    <false/>
+
+    <key>WorkingDirectory</key>
+    <string>__PUBLIC_REPO__</string>
+
+    <key>StandardOutPath</key>
+    <string>__PUBLIC_REPO__/scheduler/lint.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>__PUBLIC_REPO__/scheduler/lint.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>LANG</key>
+        <string>en_US.UTF-8</string>
+    </dict>
+
+    <key>ExitTimeOut</key>
+    <integer>1800</integer>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>Nice</key>
+    <integer>5</integer>
+</dict>
+</plist>
