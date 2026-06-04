@@ -1,4 +1,14 @@
-# personal-llm-wiki — «Второй мозг»
+<p align="center">
+  <img src="assets/banner.svg" alt="personal-llm-wiki — Second Brain · a self-maintaining Markdown wiki · no vector DB · Claude-native · reactive + proactive Telegram bridge" width="100%">
+</p>
+
+<h1 align="center">personal-llm-wiki — «Второй мозг»</h1>
+
+<p align="center">
+  <b>A personal AI second brain</b> — a self-maintaining Markdown wiki on Andrej Karpathy's
+  <a href="https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f">LLM-wiki</a> pattern.<br>
+  <b>No vector DB · no embedder · Claude-native · Telegram (reactive + proactive) · two-repo privacy</b>
+</p>
 
 > A personal AI assistant built as a **persistent, interlinked Markdown wiki** that an LLM agent maintains incrementally — Andrej Karpathy's LLM-wiki pattern. **No vector DB. No embedder.** A subscription-CLI agent (**Claude Code**, the official `claude` binary) does the semantic ranking by reading the wiki, runs across **three execution layers** (reactive · scheduled · event), a thin Telegram bridge makes it reactive *and* proactive, and a hard two-repo split keeps the framework public while your data stays private. The engine sits behind a portable seam — **Claude-native today**, Grok/Codex are deferred adapter slots.
 
@@ -21,6 +31,10 @@
 Most "chat with your notes" tools in 2026 are RAG wrappers: they chunk your documents, embed them into a vector store, and re-retrieve fragments on every question. That buys fuzzy recall at the cost of a vector database, an embedding model, and an opaque pipeline where you can never quite see *what the assistant knows about you*.
 
 **Второй мозг takes the opposite bet — Karpathy's LLM-wiki pattern.** Knowledge is *compiled once* into a human-readable Markdown wiki: the agent reads a new source, updates a handful of entity/concept pages, links them, records contradictions, and appends a line to a changelog. Every change is an ordinary `git diff` you can read, review and revert. Retrieval is just the agent reading `index.md` and following links — the LLM itself does the semantic ranking. For a single user over a few hundred pages this is not a compromise; it is *simpler, fully transparent, and zero-infrastructure*.
+
+<p align="center">
+  <img src="assets/concept.svg" alt="RAG re-derives knowledge on every query and needs a vector DB; the LLM-wiki pattern compiles knowledge once into linked Markdown that compounds — no embedder, fully transparent" width="100%">
+</p>
 
 Three things make this build different from the rest of the niche:
 
