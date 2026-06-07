@@ -2,7 +2,7 @@
 title: CONTEXT — личный «Второй мозг» (personal LLM-wiki)
 type: overview
 status: in-progress
-last_updated: 2026-05-31
+last_updated: 2026-06-07
 ---
 
 # CONTEXT — Второй мозг
@@ -27,6 +27,8 @@ last_updated: 2026-05-31
 - **Движок — Claude-native, официальный бинарь** (`claude -p --output-format json`), single-user ([ADR-0008](docs/adr/0008-engine-claude-native.md), [ADR-0009](docs/adr/0009-tos-safe-engine-access.md)). Никогда не реюзать OAuth-токен в стороннем клиенте. Bridge **engine-portable**: `GrokEngine`/`CodexEngine` — отложенные адаптеры-слоты.
 - **Read-only к источникам; `raw/` immutable.**
 - **Sanitizer в write-path (fail-closed):** маскируем токены/пароли/телефоны/emails ДО записи в `raw/` и ДО любого попадания в публичный репо.
+- **Фильтр контента — две оси + роутер задач ([ADR-0011](docs/adr/0011-relevance-sensitivity-filter.md), [compiler/relevance-policy.md](compiler/relevance-policy.md)).** Sibling к sanitizer (не внутри: секреты fail-closed/abort, чувствительность fail-to-quarantine). **Ось A — чувствительность** (`ingest/classifier.py`, on-device, ДО облака; v1 — Tier-1 детерминированный, без ML/embedder). **Ось B — релевантность/важность** на compile (промоутить-vs-settle-vs-leave-in-raw). Плюс **роутер «задача vs знание»** (консервативен в сторону знания; на сомнении — дуал-роут, чтобы не терять ростовой сигнал). **Финансы/здоровье/право — ХРАНИМ как знание** (`keep_redact_spans`: sanitizer маскирует карты/IBAN), а НЕ карантиним; карантин — для NSFW/чужих персданных/токсика. Карантин **побеждает** лейн.
+- **`raw/.quarantine/` и `raw/.tasks/` — поддиректории ВНУТРИ иммутабельного `raw/`.** Карантин (целый чувствительный док) и лейн задач (`raw/.tasks/inbox/` + `tasks/log.md`) исключены из промоушна в `wiki/` (compile/query/digest/resurface) **явным пропуском dot-папок** через `should_skip_raw_path` (`rglob` сам их НЕ пропускает — нужен `part.startswith('.')`). «drop» = «не промоутить», хард-delete нет (`raw/` иммутабелен). Каждая ненормальная диспозиция → строка в `raw/.filter-log.jsonl` (приватный репо, **только метаданные/хэш, НИКОГДА содержимое**) + человеко-строка в `log.md` (verb `filter`). Ревью карантина и дайджест читают **лог/метаданные, не тела** (изоляция инъекций).
 - **Инкрементально:** агент дописывает; каждый коммит — git-diff; блоки `<!-- keep -->` не трогаем.
 - **Без embedder/векторной базы** ([ADR-0002](docs/adr/0002-no-embedder-pure-karpathy.md)) — ранжирует сам LLM-клиент; поиск через `index.md` (+ опц. FTS5 позже).
 - **Watermark на источник** двигается после успешной записи → идемпотентность.
@@ -64,6 +66,7 @@ last_updated: 2026-05-31
 - **OQ-3. Планировщик:** v1 — локальный `launchd`; апгрейд — remote Claude routines для 24/7-проактива (данные в приватном GitHub-репо).
 - **OQ-4. Grok-адаптер:** когда добавим advisor-голос и A/B жизненных советов.
 - **OQ-5. Капабилити-руки** (browser/computer/messenger MCP) — фазовый roadmap, с анти-бот/ToS-оговорками (Facebook/Messenger — серая зона).
+- **OQ-6. Tier-2 ML-классификатор чувствительности** ([ADR-0011](docs/adr/0011-relevance-sensitivity-filter.md)) — **отложен** в отдельный будущий ADR: локальная модель ломает stdlib-only-ingest (триггер [ADR-0002](docs/adr/0002-no-embedder-pure-karpathy.md) — это FTS5, а не нейросеть), требует калибровки на RU-данных. v1 — только Tier-1 детерминированный.
 
 ## Связанные
 

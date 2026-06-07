@@ -164,6 +164,33 @@ try:
 except ImportError:
     from watermark import Watermark  # type: ignore
 
+# Классификатор (ось A чувствительности + роутер «задача vs знание»), [ADR-0011]
+# (../docs/adr/0011-relevance-sensitivity-filter.md). Sibling к sanitizer, НЕ внутри
+# него: семантика отказа противоположна (секреты fail-closed/abort; чувствительность
+# fail-to-quarantine — маршрутизирует ЦЕЛЫЙ документ, не роняет). Вызывается на
+# write-site собранной СТРАНИЦЫ, не в per-message цикле (там — только sanitizer).
+# Импорт-API — публичный контракт classifier.py; здесь НИЧЕГО не реимплементируем.
+try:
+    from .classifier import (
+        classify_sensitivity,
+        route_lane,
+        filter_log_record,
+        load_policy,
+        should_skip_raw_path,
+        Classification,
+        LaneDecision,
+    )
+except ImportError:  # запуск одиночным скриптом: python3 ingest/llm_chat.py
+    from classifier import (  # type: ignore
+        classify_sensitivity,
+        route_lane,
+        filter_log_record,
+        load_policy,
+        should_skip_raw_path,
+        Classification,
+        LaneDecision,
+    )
+
 
 SOURCE_NAME = "llm_chat"
 
@@ -830,6 +857,21 @@ def build_page(
 # Запись страницы в raw/ (атомарно) — как в telegram_export.
 # ---------------------------------------------------------------------------
 
+def _atomic_write_md(out_dir: Path, slug: str, markdown: str) -> Path:
+    """Атомарно пишет markdown в out_dir/<slug>.md (временный файл + os.replace).
+
+    Единая точка записи страницы: нормальный путь, карантин и task-инбокс пишут
+    одинаково (атомарно), отличаясь только целевым каталогом. raw/ иммутабелен —
+    повторный прогон того же conv_id отсекает watermark, так что перезаписи нет.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / ("%s.md" % slug)
+    tmp_path = out_path.with_suffix(".md.tmp")
+    tmp_path.write_text(markdown, encoding="utf-8")
+    os.replace(tmp_path, out_path)
+    return out_path
+
+
 def write_page(raw_dir: Path, conv: ChatConversation, engine: str, markdown: str) -> Path:
     """Пишет страницу разговора под raw/llm_chat/<engine>/<slug>.md (атомарно).
 
@@ -837,16 +879,225 @@ def write_page(raw_dir: Path, conv: ChatConversation, engine: str, markdown: str
     виденные conv_id, так что повторный прогон сюда не дойдёт (пустой результат).
     Группируем по подпапке движка, чтобы chatgpt/claude/grok не путались.
     """
-    out_dir = raw_dir / SOURCE_NAME / engine
-    out_dir.mkdir(parents=True, exist_ok=True)
     slug = _slugify(conv.title or "chat", conv.conv_id)
-    out_path = out_dir / ("%s.md" % slug)
+    return _atomic_write_md(raw_dir / SOURCE_NAME / engine, slug, markdown)
 
-    # Атомарная запись: временный файл + replace.
-    tmp_path = out_path.with_suffix(".md.tmp")
-    tmp_path.write_text(markdown, encoding="utf-8")
-    os.replace(tmp_path, out_path)
-    return out_path
+
+# ---------------------------------------------------------------------------
+# Диспозиция контент-фильтра (ось A чувствительности + роутер лейна), [ADR-0011].
+#
+# Вызывается на write-site СОБРАННОЙ страницы (целый документ), ПОСЛЕ того как
+# build_page уже прогнал каждое тело через fail-closed-sanitizer. Здесь решаем
+# КУДА положить целый документ и логируем всякую не-нормальную диспозицию.
+#
+# Контракт диспозиции (ровно как в ADR-0011 и compiler/relevance-policy.md):
+#   • action == quarantine | quarantine_and_redact → ВЕСЬ док в raw/.quarantine/<cat>/;
+#     исключён из compile/query/digest/resurface (P0-1 dot-exclusion).
+#   • action == keep_redact_spans | leave_in_raw | normal → обычный raw/ (sanitizer
+#     уже замаскировал опасные подстроки); finance/health/legal по требованию
+#     владельца стоят на keep_redact_spans — это ХРАНИМОЕ знание, НЕ карантин.
+#   • lane == task → raw/.tasks/inbox/ + строка в tasks/log.md; тоже исключён из
+#     compile. dual_route → И task-инбокс, И обычный raw/ (не теряем рост-сигнал).
+#   • КАРАНТИН ПОБЕЖДАЕТ ЛЕЙН: чувствительная чора уходит в карантин, не в .tasks/.
+#   • raw/ ИММУТАБЕЛЕН: «drop» = не-промоутить, НЕ хард-delete. .quarantine/ и
+#     .tasks/ — поддеревья ВНУТРИ raw/.
+#   • Любая не-нормальная диспозиция → одна JSON-строка в raw/.filter-log.jsonl
+#     через filter_log_record (НИКОГДА не содержимое — только sha256/категория/
+#     provenance) + человекочитаемая строка в log.md с verb `filter`.
+# ---------------------------------------------------------------------------
+
+# Подкаталоги-приёмники ВНУТРИ raw/ (dot-папки → P0-1: читатели raw/ их пропускают
+# через should_skip_raw_path; rglob сам НЕ пропускает). Имена держим
+# синхронными с audit-блоком relevance-policy.md.
+_QUARANTINE_DIRNAME = ".quarantine"          # raw/.quarantine/<category>/
+_TASKS_INBOX_PARTS = (".tasks", "inbox")     # raw/.tasks/inbox/
+_FILTER_LEDGER_NAME = ".filter-log.jsonl"    # raw/.filter-log.jsonl (append-only)
+
+
+def _build_source_meta(conv: ChatConversation, engine: str, export_name: str) -> Dict[str, Any]:
+    """Provenance-метаданные ЦЕЛОГО документа для классификатора (не содержимое).
+
+    Для LLM-чатов нет заведомо-чувствительного source_class (это не adult/feed-лента),
+    поэтому ось A опирается в основном на keyword/lexicon по тексту. `source_class`
+    отдаём как `llm_chat:<engine>` — провенанс для лога/политики (owner может завести
+    под него правило в приватном .local.json), без само-цензуры роутера (P0-4).
+    """
+    return {
+        "source": SOURCE_NAME,
+        "source_class": "%s:%s" % (SOURCE_NAME, engine),
+        "engine": engine,
+        "conversation_id": str(conv.conv_id),
+        "exported_from": export_name,
+    }
+
+
+def _private_repo_root(raw_dir: Path) -> Path:
+    """Корень приватного репо (llm-wiki-content): raw/ лежит внутри него, поэтому
+    его родитель — корень репо, где живут log.md и tasks/log.md."""
+    return raw_dir.parent
+
+
+def _append_filter_ledger(raw_dir: Path, record: Dict[str, Any]) -> None:
+    """Дописывает ОДНУ JSON-строку в raw/.filter-log.jsonl (append-only ledger).
+
+    `record` строит ТОЛЬКО filter_log_record() — он гарантирует, что содержимого
+    там нет (лишь sha256/категория/score/provenance). Родительские каталоги
+    создаём лениво; открываем строго в append-режиме (никогда не перезаписываем
+    историю — ledger иммутабелен, как и raw/).
+    """
+    ledger = raw_dir / _FILTER_LEDGER_NAME
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    with ledger.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+def _append_log_line(path: Path, line: str) -> None:
+    """Дописывает человекочитаемую строку в append-only лог (log.md/tasks/log.md).
+
+    Создаёт родительские каталоги и файл лениво (первая диспозиция инициализирует
+    лог). Только добавление — историю не трогаем.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(line if line.endswith("\n") else line + "\n")
+
+
+def _human_filter_line(out_path: Path, clf: "Classification", lane: "LaneDecision",
+                       disposition: str) -> str:
+    """Строка для log.md с verb `filter` (домашний формат: `## [date] verb | scope | detail`).
+
+    НИКОГДА не содержит тела документа — только путь/категорию/действие/лейн/причину
+    (provenance), как и JSON-ledger. Совпадает по форме с остальными записями log.md.
+    """
+    day = datetime.now(timezone.utc).date().isoformat()
+    detail = (
+        "%s → %s · sens=%s/%s · lane=%s%s · %s"
+        % (
+            SOURCE_NAME,
+            disposition,
+            clf.label,
+            clf.action,
+            lane.lane,
+            " (dual_route)" if lane.dual_route else "",
+            clf.reason,
+        )
+    )
+    return "## [%s] filter | %s | %s" % (day, out_path.name, detail)
+
+
+def route_disposition(
+    raw_dir: Path,
+    conv: ChatConversation,
+    engine: str,
+    markdown: str,
+    export_name: str,
+    policy: Optional[Dict[str, Any]] = None,
+) -> List[Path]:
+    """Классифицирует ЦЕЛЫЙ собранный документ и маршрутизирует его по диспозиции.
+
+    Возвращает список реально записанных путей (для подсчёта/лога вызывающим).
+    Реализует контракт ADR-0011 (см. шапку секции): карантин побеждает лейн,
+    dual_route пишет в ОБА места, любая не-нормальная диспозиция логируется в
+    raw/.filter-log.jsonl (без содержимого) и в log.md (verb `filter`).
+
+    Privacy-max (`engine_classification: off` в политике) трактуем консервативно:
+    пограничное и так уже прошло Tier-1 локально; здесь — без облака, поэтому
+    просто следуем детерминированному вердикту classifier как обычно.
+    """
+    policy = policy or load_policy()
+    policy_version = str(policy.get("policy_version", ""))
+    source_meta = _build_source_meta(conv, engine, export_name)
+
+    # Ось A (чувствительность) и роутер лейна — оба на ЦЕЛОМ документе.
+    clf = classify_sensitivity(markdown, source_meta, policy)
+    lane = route_lane(markdown, source_meta, policy)
+
+    slug = _slugify(conv.title or "chat", conv.conv_id)
+    is_quarantine = clf.action in ("quarantine", "quarantine_and_redact")
+    written: List[Path] = []
+
+    # --- 1. КАРАНТИН ПОБЕЖДАЕТ ЛЕЙН ------------------------------------------
+    # Чувствительный документ (NSFW/чужие персданные/токсик) уходит ЦЕЛИКОМ в
+    # raw/.quarantine/<category>/ и исключается из compile/query/digest/resurface.
+    # Чора с чувствительным контентом тоже сюда (не в .tasks/).
+    if is_quarantine:
+        cat = re.sub(r"[^A-Za-z0-9._-]+", "-", clf.label).strip("-") or "uncategorized"
+        out_path = _atomic_write_md(raw_dir / _QUARANTINE_DIRNAME / cat, slug, markdown)
+        written.append(out_path)
+        _log_disposition(raw_dir, out_path, clf, lane, "quarantine",
+                         markdown, policy_version)
+        return written
+
+    # --- 2. ЛЕЙН «ЗАДАЧА» ----------------------------------------------------
+    # Эфемерная чора → raw/.tasks/inbox/ + строка в tasks/log.md; исключена из
+    # compile как карантин. dual_route → ДОПОЛНИТЕЛЬНО обычный raw/ (рост-сигнал
+    # не теряем: документ остаётся видимым компилятору).
+    if lane.lane == "task":
+        task_dir = raw_dir.joinpath(*_TASKS_INBOX_PARTS)
+        task_path = _atomic_write_md(task_dir, slug, markdown)
+        written.append(task_path)
+        # Тонкий tasks/log.md (формат как у дат-напоминаний — одна строка-чек).
+        day = datetime.now(timezone.utc).date().isoformat()
+        _append_log_line(
+            _private_repo_root(raw_dir) / "tasks" / "log.md",
+            "- [ ] [%s] %s · из %s · %s" % (day, task_path.name, SOURCE_NAME, lane.reason),
+        )
+        _log_disposition(raw_dir, task_path, clf, lane, "task", markdown, policy_version)
+
+        if lane.dual_route:
+            # На сомнении не теряем знание: пишем ТАКЖЕ в обычный raw/ (видим компилятору).
+            normal_path = write_page(raw_dir, conv, engine, markdown)
+            written.append(normal_path)
+            _log_disposition(raw_dir, normal_path, clf, lane, "dual_route_knowledge",
+                             markdown, policy_version)
+        return written
+
+    # --- 3. ОБЫЧНЫЙ raw/ -----------------------------------------------------
+    # keep_redact_spans (финансы/здоровье/право — ХРАНИМ как знание; sanitizer уже
+    # замаскировал опасные подстроки) / leave_in_raw / normal → обычный путь.
+    out_path = write_page(raw_dir, conv, engine, markdown)
+    written.append(out_path)
+    # Нормаль не логируем как фильтр-событие; всё прочее (keep_redact_spans/
+    # leave_in_raw) — логируем диспозицию (не содержимое), чтобы ревью видело.
+    if clf.action != "normal" or lane.dual_route:
+        _log_disposition(raw_dir, out_path, clf, lane,
+                         clf.action if clf.action != "normal" else "knowledge",
+                         markdown, policy_version)
+    return written
+
+
+def _log_disposition(
+    raw_dir: Path,
+    out_path: Path,
+    clf: "Classification",
+    lane: "LaneDecision",
+    disposition: str,
+    content: str,
+    policy_version: str,
+) -> None:
+    """Логирует одну не-нормальную диспозицию: JSON-строка в ledger + строка в log.md.
+
+    JSON строит filter_log_record() — НИКОГДА не содержит тела (только sha256 как
+    «fingerprint без раскрытия»). `axis` фиксирует, какая ось приняла решение:
+    карантин/keep_redact_spans/leave_in_raw → sensitivity; task/dual_route → lane.
+    Путь в логах — относительный к raw/ (стабильный provenance, не абсолютный хост-путь).
+    """
+    axis = "lane" if disposition in ("task", "dual_route_knowledge") else "sensitivity"
+    try:
+        rel_path = str(out_path.relative_to(raw_dir))
+    except ValueError:
+        rel_path = out_path.name
+    record = filter_log_record(
+        rel_path, clf, axis=axis, lane=lane, content=content,
+        policy_version=policy_version,
+    )
+    # Диспозицию-метку добавляем поверх (filter_log_record не знает про dual-route-ветку).
+    record["disposition"] = disposition
+    _append_filter_ledger(raw_dir, record)
+    _append_log_line(
+        _private_repo_root(raw_dir) / "log.md",
+        _human_filter_line(out_path, clf, lane, disposition),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -893,6 +1144,10 @@ def ingest(export_json: Path, raw_dir: Path, engine: Optional[str] = None) -> in
     wm = Watermark.load(raw_dir, SOURCE_NAME)
     seen_ids = set(wm.cursor.get("seen_conversation_ids", []))
 
+    # Политику фильтра грузим ОДИН раз на прогон (парсинг JSON-блока из
+    # relevance-policy.md + приватный override) и переиспользуем для всех страниц.
+    policy = load_policy()
+
     export_name = export_json.name
     total_written = 0
     new_ids: List[str] = []
@@ -921,10 +1176,18 @@ def ingest(export_json: Path, raw_dir: Path, engine: Optional[str] = None) -> in
             new_ids.append(marker_id)
             continue
 
-        out_path = write_page(raw_dir, conv, engine, markdown)
+        # Контент-фильтр на ЦЕЛОМ собранном документе ([ADR-0011]): классификация
+        # чувствительности + роутер лейна, затем маршрутизация по диспозиции
+        # (карантин / .tasks/ / обычный raw/, карантин побеждает лейн). Любая
+        # не-нормальная диспозиция логируется в raw/.filter-log.jsonl (без тела) и
+        # в log.md. Тела сообщений уже прошли fail-closed-sanitizer в build_page.
+        written_paths = route_disposition(
+            raw_dir, conv, engine, markdown, export_name, policy
+        )
         new_ids.append(marker_id)
         total_written += 1
-        print("  [write] %s (%d сообщений)" % (out_path, len(conv.messages)))
+        for out_path in written_paths:
+            print("  [write] %s (%d сообщений)" % (out_path, len(conv.messages)))
 
     # Двигаем watermark ТОЛЬКО если что-то реально обработали (advance-after-write).
     if new_ids:

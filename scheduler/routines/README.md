@@ -2,11 +2,12 @@
 title: Каталог routine'ов — плановый слой
 type: overview
 status: accepted
-last_updated: 2026-05-31
+last_updated: 2026-06-07
 sources:
   - ../../docs/research/proactive-scheduling.md
   - ../../docs/adr/0007-engine-spawn-and-scheduler.md
   - ../../docs/adr/0008-engine-claude-native.md
+  - ../../docs/adr/0011-relevance-sensitivity-filter.md
 ---
 
 # Каталог routine'ов «Второго мозга»
@@ -32,15 +33,16 @@ sources:
 routine'ы спавнят его **через** [`bridge.engine`](../../bridge/README.md) — не
 дублируя логику `claude -p` (парсинг JSON, таймаут, resume).
 
-## Каталог (5 routine'ов)
+## Каталог (6 routine'ов)
 
 | # | routine | Слой / триггер | Расписание (дефолт) | Что делает | Исходящее |
 |---|---|---|---|---|---|
 | 1 | `compile` | ПЛАНОВОЕ + СОБЫТИЙНОЕ | ночью 03:30 (+ опц. WatchPaths на `raw/`) | новые источники из `raw/` → страницы `wiki/` (инкрементально, по watermark) | — (правит файлы вики) |
-| 2 | `digest` | ПЛАНОВОЕ | утром 08:00 (+ sweep каждые 30 мин) | due-напоминания + дни рождения → один Telegram-дайджест | Telegram (owner) |
+| 2 | `digest` | ПЛАНОВОЕ | утром 08:00 (+ sweep каждые 30 мин) | due-напоминания + дни рождения → один Telegram-дайджест (+ батч-сводка фильтра контента) | Telegram (owner) |
 | 3 | `lint` | ПЛАНОВОЕ | еженедельно, вс 04:00 | PII/секрет-скан публичного репо + аудит вики (противоречия/stale/orphans) | Telegram (отчёт) + exit≠0 на PII |
 | 4 | `research` | ПЛАНОВОЕ | вт и пт 09:00 | пользовательские запросы → web-research «руками» → файл в `wiki/research/` | Telegram (дайджест) + файл |
 | 5 | `resurface` | ПЛАНОВОЕ | сб 11:00 | всплытие давно не тронутых идей (мягкий nudge) | Telegram (1–2 строки) |
+| 6 | `quarantine-review` | ПЛАНОВОЕ | пн и чт 09:30 (SLA) | READ-ONLY ревью карантина фильтра по ledger (метаданные-онли) → очередь владельцу + одношаговый re-promote ложных срабатываний | Telegram (очередь на ревью) |
 
 Расписания — дефолты из plist-шаблонов в этой папке; правь под себя. Все routine'ы
 **идемпотентны** (safe-to-run-twice): launchd коалесцирует пропущенные при сне
@@ -66,7 +68,16 @@ routine'ы спавнят его **через** [`bridge.engine`](../../bridge/R
 - **Поток:** дешёвый детерминированный предчек «что due» ([`reminders.py`](../reminders.py),
   без движка) → если есть due, спавн движка с sweep-промптом → last-mile
   `scan_secrets`-guard → owner-push в Telegram.
-- **Идемпотентность:** дедуп по `status`/`last_fired` (см. [`reminders_spec.md`](../reminders_spec.md)).
+- **Фильтр-аудит ([ADR-0011](../../docs/adr/0011-relevance-sensitivity-filter.md) §8b/§11):**
+  дайджест дополнительно сурфейсит **батч-сводку** фильтра контента — «N в карантин
+  за период (nsfw:a, others_pii:b…) + sanitized-сэмпл на категорию — проверить?» и
+  «M чор обработано (`tasks/log.md`); K ждёт в `raw/.tasks/inbox/`». Читает **только**
+  ledger `raw/.filter-log.jsonl` и **считает** файлы в инбоксе — **никогда** не
+  открывает тела карантина/чор (P0-2, изоляция инъекций). Батчинг/rate-limit через
+  `FILTER_DIGEST_WATERMARK`: один карантин не повторяется каждые 30 мин. Полноценное
+  ревью с re-promote — отдельная routine #6 `quarantine-review`.
+- **Идемпотентность:** дедуп по `status`/`last_fired` (см. [`reminders_spec.md`](../reminders_spec.md));
+  фильтр-сводка — по filter-watermark (двигается только после успешного пуша).
 - **Формат напоминаний** — контракт [`reminders_spec.md`](../reminders_spec.md)
   (поля, kinds `oneoff`/`recurring`/`spaced`, recurrence, дни рождения из вики).
 
@@ -102,13 +113,40 @@ routine'ы спавнят его **через** [`bridge.engine`](../../bridge/R
   вопрос «ещё актуальна?». Файлы не меняет (мягкий nudge). Если spaced-механизма
   в `digest` достаточно — эту routine можно не устанавливать.
 
+### 6. `quarantine-review` — мандатное ревью карантина (SLA'd)
+
+- **Что:** периодический **READ-ONLY** проход по карантину фильтра контента
+  ([ADR-0011](../../docs/adr/0011-relevance-sensitivity-filter.md) §8b/§11). Движок
+  сурфейсит владельцу **очередь на ревью** (по категориям, sanitized-сэмплы) и по
+  его одобрению делает **один логируемый re-promote** ложного срабатывания.
+- **Зачем отдельно от `digest`:** `digest` даёт лёгкий утренний нудж «N — проверить?»;
+  это — **мандатный** проход с **SLA** (дефолт пн+чт), чтобы карантин не копился
+  молча, плюс escape-hatch возврата. Классификатор намеренно предпочитает ложно-
+  положительные (карантин дёшев, `raw/` иммутабелен) — цена этого — обязательное ревью.
+- **Метаданные-онли (P0-2):** ни движок, ни хелпер
+  [`quarantine-review/promote.py`](quarantine-review/promote.py) **никогда** не
+  открывают тела карантина (`raw/.quarantine/**`) и `raw/.tasks/**` — только ledger
+  `raw/.filter-log.jsonl` (категория/score/`sha256`/provenance). Карантинный документ
+  мог нести prompt-injection: ревьюим **отпечаток**, не текст. Показываем **сэмплы,
+  не голые счётчики**.
+- **re-promote = не удаление (иммутабельность `raw/`):** возврат дописывает в ledger
+  **диспозицию-реверс** (`axis: re-promote`, `action: normal`, тот же `sha256`) +
+  строку в `log.md`; файл карантина остаётся (аудит). Компиляция трактует реверс как
+  «документ с этим отпечатком очищен к промоушену». Идемпотентно: уже-возвращённые
+  отпечатки выпадают из очереди.
+- **Реализация/установка:** runner-док + промпт — в [`quarantine-review/README.md`](quarantine-review/README.md),
+  детерминированный хелпер — [`quarantine-review/promote.py`](quarantine-review/promote.py),
+  расписание/SLA — [`ru.secondbrain.quarantine-review.plist`](ru.secondbrain.quarantine-review.plist).
+  Имя `quarantine-review` регистрируется в реестре `ROUTINES` файла [`../routines.py`](../routines.py).
+
 ## Два варианта планировщика (резюме)
 
 Подробности и пошаговая установка — в [`scheduler/README.md`](../README.md). Кратко:
 
 - **Локальный launchd (рекомендация для v1).** Plist-шаблоны `ru.secondbrain.*.plist`
-  в этой папке (`compile`/`lint`/`research`/`resurface`) + `ru.secondbrain.digest.plist`
-  в [`scheduler/`](../). Просто и приватно, но **работает, только пока MacBook бодрствует**.
+  в этой папке (`compile`/`lint`/`research`/`resurface`/`quarantine-review`) +
+  `ru.secondbrain.digest.plist` в [`scheduler/`](../). Просто и приватно, но
+  **работает, только пока MacBook бодрствует**.
 - **Remote Claude routines (апгрейд к 24/7).** Те же промпты, запускаемые удалённой
   Claude-routine **над приватным GitHub-репо** — срабатывают, **даже когда Mac спит
   или выключен**. Это путь к настоящему always-on без Mac Mini/LaunchDaemon
@@ -132,5 +170,7 @@ routine'ы спавнят его **через** [`bridge.engine`](../../bridge/R
 ## Связанные
 
 - [../README.md](../README.md) · [../routines.py](../routines.py) · [../run_routine.sh](../run_routine.sh) · [../digest.py](../digest.py) · [../lint_public.py](../lint_public.py) · [../reminders_spec.md](../reminders_spec.md)
+- [quarantine-review/README.md](quarantine-review/README.md) · [quarantine-review/promote.py](quarantine-review/promote.py) · [ru.secondbrain.quarantine-review.plist](ru.secondbrain.quarantine-review.plist)
+- [../../docs/adr/0011-relevance-sensitivity-filter.md](../../docs/adr/0011-relevance-sensitivity-filter.md) · [../../compiler/relevance-policy.md](../../compiler/relevance-policy.md) · [../../ingest/classifier.py](../../ingest/classifier.py)
 - [../../docs/adr/0008-engine-claude-native.md](../../docs/adr/0008-engine-claude-native.md) · [../../docs/adr/0009-tos-safe-engine-access.md](../../docs/adr/0009-tos-safe-engine-access.md) · [../../docs/adr/0010-wiki-content-model.md](../../docs/adr/0010-wiki-content-model.md) · [../../docs/adr/0007-engine-spawn-and-scheduler.md](../../docs/adr/0007-engine-spawn-and-scheduler.md)
 - [../../docs/research/proactive-scheduling.md](../../docs/research/proactive-scheduling.md) · [../../CONTEXT.md](../../CONTEXT.md)

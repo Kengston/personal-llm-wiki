@@ -60,6 +60,24 @@ from typing import Iterable
 from dateutil import rrule as _rrule
 from dateutil import tz as _tz
 
+# --- P0-1: containment-guard для обхода деревьев контента (ADR-0011 §8b/§11) ---
+# ЛЮБОЙ читатель, который рекурсивно глобит дерево контента, ОБЯЗАН прогонять
+# результаты rglob через should_skip_raw_path: rglob сам НЕ пропускает dot-папки,
+# поэтому без явной проверки в обход попали бы поддеревья raw/.quarantine/ и
+# raw/.tasks/ (карантин/чоры) — ломается их изоляция (P0-1 adversarial-review
+# ADR-0011). birthdays_from_wiki глобит wiki/, но guard ставим всё равно: (1)
+# defense-in-depth, если wiki/ когда-нибудь окажется рядом со скрытыми каталогами,
+# (2) единый инвариант обхода во всех читателях scheduler. Импортим из общего
+# классификатора (один контракт на write-path), с stdlib-fallback, чтобы reminders
+# оставался импортируемым/тестируемым даже без установленного ingest.
+try:
+    from ingest.classifier import should_skip_raw_path as _should_skip_raw_path
+except Exception:  # pragma: no cover - ingest может быть не на пути
+    def _should_skip_raw_path(path: str | Path) -> bool:
+        """Fallback, эквивалентный ingest.classifier.should_skip_raw_path:
+        путь со скрытой (dot-) частью считаем исключённым (.quarantine/.tasks/…)."""
+        return any(part.startswith(".") for part in Path(path).parts)
+
 # ---------------------------------------------------------------------------
 # Константы домена
 # ---------------------------------------------------------------------------
@@ -405,6 +423,17 @@ def birthdays_from_wiki(
         return items
 
     for md in sorted(wdir.rglob("*.md")):
+        # P0-1 (ADR-0011 §8b/§11): rglob НЕ пропускает dot-папки сам — режем любой
+        # путь со скрытой частью ОТНОСИТЕЛЬНО wiki_dir, чтобы вложенные .quarantine/
+        # .tasks/.watermarks (если когда-нибудь окажутся в дереве) не протекли в
+        # сканер дней рождения. Проверяем rel-путь, а не абсолютный: сам wiki_dir
+        # может лежать в скрытом домашнем каталоге — это не повод пропускать файл.
+        try:
+            rel = md.relative_to(wdir)
+        except ValueError:
+            rel = md
+        if _should_skip_raw_path(rel):
+            continue
         fm = _extract_frontmatter(md.read_text(encoding="utf-8"))
         if not fm:
             continue

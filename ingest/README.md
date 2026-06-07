@@ -2,10 +2,11 @@
 title: Ингест — слой загрузки источников
 type: overview
 status: in-progress
-last_updated: 2026-05-31
+last_updated: 2026-06-07
 sources:
   - ../docs/research/data-ingestion.md
   - ../docs/research/privacy-security.md
+  - ../docs/adr/0011-relevance-sensitivity-filter.md
 ---
 
 # Ингест — слой загрузки источников
@@ -17,6 +18,7 @@ sources:
 | Файл | Роль |
 |---|---|
 | [`sanitizer.py`](sanitizer.py) | **Корона.** Маскер секретов/PII в write-path (fail-closed). Владелец маскирования; переиспользуется [`scheduler/lint_public.py`](../scheduler/). |
+| [`classifier.py`](classifier.py) | **Tier-1 фильтр чувствительности + роутер «задача vs знание»** ([ADR-0011](../docs/adr/0011-relevance-sensitivity-filter.md)). Sibling к sanitizer (не внутри): fail-**to-quarantine**, маршрутизирует **целый** документ. Детерминированный, stdlib-only, без ML/embedder. Реализован. |
 | [`watermark.py`](watermark.py) | Per-source JSON-курсор «дочитано до» → идемпотентный ре-ингест. |
 | [`llm_chat.py`](llm_chat.py) | Парсер экспортов диалогов **ChatGPT / Claude / Grok** → sanitized markdown + выжимка идей/концепций/решений; код-сессии → accomplishment-сводка ([ADR-0010](../docs/adr/0010-wiki-content-model.md)). Реализован. |
 | [`telegram_export.py`](telegram_export.py) | Парсер Telegram Desktop `result.json` → sanitized markdown. Реализован. |
@@ -32,6 +34,8 @@ sources:
 
 - **Read-only к источникам.** Коннекторы только читают экспорт, никогда не пишут в источник; `raw/` — immutable снапшот.
 - **Sanitizer — в write-path, fail-closed.** КАЖДОЕ тело сообщения и имя отправителя проходят `sanitizer.fail_closed_sanitize` ДО записи. Если санитайзер не может гарантировать чистоту — поднимается `SanitizerError`, файл НЕ пишется, watermark НЕ двигается.
+- **Classifier — параллельный контракт, fail-to-quarantine ([ADR-0011](../docs/adr/0011-relevance-sensitivity-filter.md)).** Sibling к sanitizer (НЕ внутри — противоположная семантика отказа): чувствительность маршрутизирует **целый** документ, не маскирует подстроки. Зовётся на **write-site целого документа** (не в per-message цикле). Карантин предпочитает ложно-**положительные** (`raw/` хранит → дёшево); хард-delete нет. Карантин **побеждает** лейн задач. Каждая ненормальная диспозиция → строка в `raw/.filter-log.jsonl` (`filter_log_record` — **только метаданные/хэш, НИКОГДА содержимое**) + человеко-строка в `log.md` (verb `filter`).
+- **`raw/` иммутабелен, dot-папки исключены из промоушна (P0-1).** `raw/.quarantine/` и `raw/.tasks/` — поддиректории внутри `raw/`. ЛЮБОЙ читатель `raw/` (compile/query/digest/resurface) обязан фильтровать пути через `should_skip_raw_path` — `rglob` НЕ пропускает dot-папки сам.
 - **Watermark двигается только после успешной записи** → повторный ингест того же экспорта идемпотентен (дубли отсекаются по `last_message_id`).
 - **Код — не PII** и идёт **отдельным треком, минуя sanitizer** (`codebase_graphify`).
 - **Sanitizer не дублировать.** Единственный владелец маскирования — [`sanitizer.py`](sanitizer.py); и ингест, и линт публичного репо импортируют его.
@@ -58,6 +62,11 @@ raw/
 ├── .watermarks/            # служебные курсоры (один JSON на источник)
 │   ├── llm_chat.json       # множество виденных conversation_id (по движкам)
 │   └── telegram.json
+├── .quarantine/            # ADR-0011: целые чувствительные доки (NSFW/чужие персданные/токсик)
+│   └── <категория>/        #   исключено из compile/query/digest/resurface (dot-папка)
+├── .tasks/                 # ADR-0011: лейн реактивных чор (билеты/покупки)
+│   └── inbox/              #   исключено из compile, как карантин; видимая строка → tasks/log.md
+├── .filter-log.jsonl       # ADR-0011: append-only ledger диспозиций (метаданные/хэш, НЕ содержимое)
 ├── llm_chat/
 │   ├── chatgpt/
 │   │   └── <slug>-<conv_id>.md  # одна страница на разговор, provenance-frontmatter
@@ -68,6 +77,8 @@ raw/
 └── telegram/
     └── <slug>-<chat_id>.md  # одна страница на диалог, provenance-frontmatter
 ```
+
+> **Карантин/`.tasks/` — поддеревья ВНУТРИ иммутабельного `raw/`** (не отдельный каталог). Они начинаются с точки, поэтому `should_skip_raw_path` исключает их из любого читателя `raw/` (`rglob` сам dot-папки НЕ пропускает). Финансы/здоровье/право **НЕ** карантинятся — они хранятся как обычное знание в `raw/<источник>/`, sanitizer лишь маскирует опасные подстроки (карты/IBAN).
 
 > Запускать модулем (`python3 -m ingest.telegram_export ...`) из корня публичного репо, чтобы работал импорт пакета `ingest`. Можно и одиночным файлом (`python3 ingest/telegram_export.py ...`) — модуль поддерживает оба способа.
 
@@ -170,6 +181,35 @@ python3 -m ingest.sanitizer    # 16 проверок маскирования
 python3 -m ingest.watermark    # 4 проверки идемпотентности курсора
 ```
 
+## Classifier — публичный интерфейс
+
+Параллельный контракт sanitizer ([ADR-0011](../docs/adr/0011-relevance-sensitivity-filter.md)). Где **sanitizer** маскирует подстроки fail-closed, **classifier** решает диспозицию **целого** документа fail-to-quarantine и маршрутизирует «задачу vs знание». Политика — JSON-блок из [`compiler/relevance-policy.md`](../compiler/relevance-policy.md) + приватный `.filter-policy.local.json`-override (граница двух репо: лексиконы/имена — только приватно). Сигнатуры стабильны (на них опираются compile/digest — не менять без согласования):
+
+```python
+from ingest.classifier import (
+    classify_sensitivity, route_lane, should_skip_raw_path, filter_log_record, load_policy,
+)
+
+load_policy()                                   # -> dict   JSON-блок политики + приватный override
+classify_sensitivity(text, source_meta, policy) # -> Classification(label, action, tier, reason, score) — НИКОГДА не текст
+route_lane(text, source_meta, policy)            # -> LaneDecision(lane, dual_route, reason)
+should_skip_raw_path(path)                        # -> bool   P0-1: True, если любая часть пути начинается с "."
+filter_log_record(raw_path, clf, *, axis, lane=None, content=None, policy_version="")  # -> dict ledger (sha256, НЕ содержимое)
+```
+
+Две оси + роутер ([ADR-0011](../docs/adr/0011-relevance-sensitivity-filter.md)):
+
+- **Ось A — чувствительность** (здесь, on-device, ДО облака). Tier-1 детерминированный: `source_class` + `domain_blocklist` + (opt-in) `lexicon` + `pii_density`. БЕЗ ML, БЕЗ embedder (Tier-2 ML — отложен).
+- **Диспозиции.** `quarantine`/`quarantine_and_redact` → весь док в `raw/.quarantine/<категория>/`, исключён из compile. `keep_redact_spans`/`leave_in_raw`/`normal` → обычный `raw/` (sanitizer уже замаскировал опасные подстроки), просто **логируем**. Финансы/здоровье/право по дефолту = `keep_redact_spans` (хранятся как знание, НЕ карантинятся).
+- **Роутер «задача vs знание»** консервативен в сторону знания: диверт в `raw/.tasks/inbox/` + строка в `tasks/log.md` только при форме «императив + объект»; на сомнении — **дуал-роут** (и task-log, и видимо для compile), чтобы не терять ростовой сигнал. **Карантин побеждает лейн** (чувствительная чора → карантин, не в `.tasks/`).
+- **Ось B — релевантность/важность** — НЕ здесь, а на compile-шаге (промоутить-vs-settle-vs-leave-in-raw); egress там уже оплачен.
+
+Самотест (синтетика «Иван Пример», без побочных эффектов):
+
+```bash
+python3 -m ingest.classifier    # дым-тест классификации + роутера на синтетике
+```
+
 ## Связанные
 
-- [../docs/research/data-ingestion.md](../docs/research/data-ingestion.md) · [../docs/research/privacy-security.md](../docs/research/privacy-security.md) · [../docs/adr/0003-two-repos-public-private.md](../docs/adr/0003-two-repos-public-private.md) · [../docs/adr/0007-engine-spawn-and-scheduler.md](../docs/adr/0007-engine-spawn-and-scheduler.md) · [../CONTEXT.md](../CONTEXT.md) · [../compiler/rules.md](../compiler/rules.md) · [../scheduler/](../scheduler/)
+- [../docs/research/data-ingestion.md](../docs/research/data-ingestion.md) · [../docs/research/privacy-security.md](../docs/research/privacy-security.md) · [../docs/adr/0003-two-repos-public-private.md](../docs/adr/0003-two-repos-public-private.md) · [../docs/adr/0007-engine-spawn-and-scheduler.md](../docs/adr/0007-engine-spawn-and-scheduler.md) · [../docs/adr/0011-relevance-sensitivity-filter.md](../docs/adr/0011-relevance-sensitivity-filter.md) · [../compiler/relevance-policy.md](../compiler/relevance-policy.md) · [../CONTEXT.md](../CONTEXT.md) · [../compiler/rules.md](../compiler/rules.md) · [../scheduler/](../scheduler/)
