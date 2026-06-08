@@ -31,6 +31,8 @@ last_updated: 2026-06-07
 | [0009](0009-tos-safe-engine-access.md) | ToS-безопасный доступ: только официальный бинарь, single-user allow-list, OAuth-токен не реюзать в стороннем клиенте. | accepted |
 | [0010](0010-wiki-content-model.md) | Контент-модель вики: концепции/развитие/идеи-first; код-сессии → accomplishment/capability-выжимка, не verbatim. | accepted |
 | [0011](0011-relevance-sensitivity-filter.md) | Фильтр контента: чувствительность (NSFW/приватное, on-device до облака) + релевантность (на compile) — две ортогональные оси + роутер «задача vs знание». | accepted |
+| [0012](0012-language-typescript-port.md) | Язык реализации — порт Python→TypeScript (идиоматичный, in-place, engine-portable сохранён); инварианты несёт поведение, не язык; ничего не superseded. | accepted |
+| [0013](0013-pii-density-valid-phones.md) | Фикс pii_density: считаем только валидные телефоны (10–15 цифр) — даты ISO больше не триггерят others_pii-карантин (осознанное расхождение с Python). | accepted |
 
 ## Сквозные темы
 

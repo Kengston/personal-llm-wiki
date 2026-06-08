@@ -19,14 +19,14 @@
 
 ## 2. Обязанности sanitizer (write-path, fail-closed)
 
-Sanitizer — общий модуль [ingest/sanitizer.py](../ingest/sanitizer.py) с публичным интерфейсом `sanitize_text(text: str) -> str` (маскирует), `scan_secrets(text: str) -> list[str]` (детектит секреты, для линта) и `fail_closed_sanitize(text: str) -> str` (write-path: при сбое `SanitizerError`). Инвариант [CONTEXT §3](../CONTEXT.md)/[AGENTS.md](../AGENTS.md).
+Sanitizer — общий модуль [src/ingest/sanitizer.ts](../src/ingest/sanitizer.ts) с публичным интерфейсом `sanitizeText(text: string): string` (маскирует), `scanSecrets(text: string): string[]` (детектит секреты, для линта) и `failClosedSanitize(text: string): string` (write-path: при сбое `SanitizerError`). Инвариант [CONTEXT §3](../CONTEXT.md)/[AGENTS.md](../AGENTS.md).
 
-- **Маскируем ДО записи.** Любой текст из источника (ingest) **и** из входящего Telegram-сообщения (capture) проходит `sanitize_text()` **до** записи в `raw/` или `wiki/`. Маскируются: токены/ключи API, пароли, телефоны, email, прочие секреты-паттерны (полный список — в самом модуле, он — единственный владелец правил маскирования; **здесь не дублируем**).
-- **Fail-closed.** Если `sanitize_text()` бросил исключение — **запись отменяется целиком** (не пишем частично-обработанный текст). Лучше потерять ход, чем записать сырой секрет.
-- **Не маскируем дважды и не «чиним» вручную.** Движок не пишет собственных regex-маскировок в страницах — только вызывает модуль. Если паттерн пропущен — это баг `sanitizer.py` (завести `> ⚠ OPEN:`), а не повод хардкодить замену в прозе.
+- **Маскируем ДО записи.** Любой текст из источника (ingest) **и** из входящего Telegram-сообщения (capture) проходит `sanitizeText()` **до** записи в `raw/` или `wiki/`. Маскируются: токены/ключи API, пароли, телефоны, email, прочие секреты-паттерны (полный список — в самом модуле, он — единственный владелец правил маскирования; **здесь не дублируем**).
+- **Fail-closed.** Если `sanitizeText()` бросил исключение — **запись отменяется целиком** (не пишем частично-обработанный текст). Лучше потерять ход, чем записать сырой секрет.
+- **Не маскируем дважды и не «чиним» вручную.** Движок не пишет собственных regex-маскировок в страницах — только вызывает модуль. Если паттерн пропущен — это баг `src/ingest/sanitizer.ts` (завести `> ⚠ OPEN:`), а не повод хардкодить замену в прозе.
 - **Чужие секреты тоже PII.** В личную вику не пишем секреты/токены/пароли даже свои (crown-jewel в прозу не выносим — [ADR-0009](../docs/adr/0009-tos-safe-engine-access.md) «приватность движка»): им место в `.env`, не в тексте, который читает облачный движок.
-- **Граница публичного репо.** Любой пример, попадающий в **этот** (публичный) репо, обязан пройти `scan_secrets()` и быть синтетическим. Страж — [scheduler/lint_public.py](../scheduler/) (exit≠0 при находке).
-- **Исключение — код.** Трек `codebase_graphify` (граф кодовых баз) **минует** sanitizer (код — не PII), но его артефакты не коммитятся в публичный репо без отдельной проверки на секреты-в-коде. **Важно:** это про *структуру* кода (граф), а не про выжимку — accomplishment-записи в `wiki/projects/` (§3.5) пишутся прозой про *что сделано*, и сами секретов содержать не должны.
+- **Граница публичного репо.** Любой пример, попадающий в **этот** (публичный) репо, обязан пройти `scanSecrets()` и быть синтетическим. Страж — [src/scheduler/lint-public.ts](../src/scheduler/lint-public.ts) (exit≠0 при находке).
+- **Исключение — код.** Трек `codebase`-graphify (граф кодовых баз) **минует** sanitizer (код — не PII), но его артефакты не коммитятся в публичный репо без отдельной проверки на секреты-в-коде. **Важно:** это про *структуру* кода (граф), а не про выжимку — accomplishment-записи в `wiki/projects/` (§3.5) пишутся прозой про *что сделано*, и сами секретов содержать не должны.
 
 ## 3. Анатомия страницы по типам (контент-модель [ADR-0010](../docs/adr/0010-wiki-content-model.md))
 
@@ -162,19 +162,19 @@ title: Проект — Telegram-мост «Второй мозг»
 type: project
 status: active            # active | shipped | parked | dropped
 last_updated: 2026-05-31
-tags: [python, fastapi, integration]
-skills: [backend-integration, async-python, api-design]   # фид в capability-profile
+tags: [typescript, fastify, integration]
+skills: [backend-integration, typescript-node, api-design]   # фид в capability-profile
 sources:
   - ../../raw/llm-chat/claude-2026-05-29.md   # полный технический диалог (детали — здесь)
 claims:
-  - {id: claim_8e21, text: "Построил тонкий FastAPI-мост Telegram↔движок с owner-allow-list", confidence: 0.9, status: verified, sources: [../../raw/llm-chat/claude-2026-05-29.md]}
+  - {id: claim_8e21, text: "Построил тонкий Fastify-мост Telegram↔движок с owner-allow-list", confidence: 0.9, status: verified, sources: [../../raw/llm-chat/claude-2026-05-29.md]}
 ---
 
 # Проект — Telegram-мост «Второй мозг»
 
-**Что построил.** Тонкий webhook-мост (FastAPI), который принимает сообщения owner-only-чата и спавнит движок одним коротким процессом на задачу.
+**Что построил.** Тонкий webhook-мост (Fastify), который принимает сообщения owner-only-чата и спавнит движок одним коротким процессом на задачу.
 
-**Навык.** Backend-интеграция, async-Python, дизайн узкого безопасного API-шва (single-user allow-list).
+**Навык.** Backend-интеграция, TypeScript/Node, дизайн узкого безопасного API-шва (single-user allow-list).
 
 **Ключевые решения.**
 - Spawn-fresh-per-task вместо резидентного демона — каждый ход crash-safe.
@@ -205,7 +205,7 @@ last_updated: 2026-05-31
 Сводка компетенций, выведенная из проектов (источник истины по «что сделал» — страницы `projects/`).
 
 ## Backend / интеграции
-- Async-Python, FastAPI, дизайн узких безопасных API-швов — [Telegram-мост](projects/sample-project.md).
+- TypeScript/Node, Fastify, дизайн узких безопасных API-швов — [Telegram-мост](projects/sample-project.md).
 
 ## Связанные
 - [projects/sample-project.md](projects/sample-project.md) · [index.md](index.md)
@@ -237,7 +237,7 @@ last_updated: 2026-05-31
 - **`profile.md`** — страница обо мне: устойчивые предпочтения, факты, привычки, ценности (claim'ы как у person). Сюда capture кладёт «я предпочитаю…», «я работаю в…».
 - **`index.md`** — каталог всех страниц по категориям (ideas/concepts/growth/people/projects/journal + capability-profile). **Читается первым** (§1). One-line-саммари — **конкретные** (расплывчатые → движок берёт не ту страницу, реальный провал — [research/memory-architecture.md](../docs/research/memory-architecture.md)). Формат — §10.
 
-> **Провенанс источников.** Отдельных entity-страниц `type: source` в вики **нет** (контент-модель [ADR-0010](../docs/adr/0010-wiki-content-model.md) их не вводит): провенанс живёт во frontmatter-поле `sources:` каждой страницы (пути в `raw/`) и в самих `raw/`-файлах (provenance-frontmatter: `source`, `exported_at`, watermark-cursor). Watermark-курсоры — служебные, в [ingest/watermark.py](../ingest/) и `raw/.watermarks/`, не в `wiki/`.
+> **Провенанс источников.** Отдельных entity-страниц `type: source` в вики **нет** (контент-модель [ADR-0010](../docs/adr/0010-wiki-content-model.md) их не вводит): провенанс живёт во frontmatter-поле `sources:` каждой страницы (пути в `raw/`) и в самих `raw/`-файлах (provenance-frontmatter: `source`, `exported_at`, watermark-cursor). Watermark-курсоры — служебные, в [src/ingest/watermark.ts](../src/ingest/watermark.ts) и `raw/.watermarks/`, не в `wiki/`.
 
 ## 4. Анатомия claim'а
 
@@ -282,15 +282,15 @@ last_updated: 2026-05-31
 
 ## 5a. Лейн задач — реактивные чоры (отдельно от датированных reminders) ([ADR-0011](../docs/adr/0011-relevance-sensitivity-filter.md))
 
-Не всё «лишнее» — знание и не всё — датированное напоминание. **Реактивная чора** (купить билет, заказать, забронировать, «найди мне…») — это *эфемерное действие без срока*: его место не в вики и не в `reminders/`, а в отдельном лейне задач. Решение «задача vs знание» принимает `route_lane()` из [ingest/classifier.py](../ingest/classifier.py) **до** оценки важности (§8b) и роняется в [`compiler/relevance-policy.md`](../compiler/relevance-policy.md) (`lanes.*`).
+Не всё «лишнее» — знание и не всё — датированное напоминание. **Реактивная чора** (купить билет, заказать, забронировать, «найди мне…») — это *эфемерное действие без срока*: его место не в вики и не в `reminders/`, а в отдельном лейне задач. Решение «задача vs знание» принимает `routeLane()` из [src/ingest/classifier.ts](../src/ingest/classifier.ts) **до** оценки важности (§8b) и роняется в [`compiler/relevance-policy.md`](../compiler/relevance-policy.md) (`lanes.*`).
 
-- **Куда:** `route_lane(...).lane == "task"` → файл в `raw/.tasks/inbox/` + **одна** строка в тонкий `tasks/log.md`. Выполняется **реактивно** (движок может предложить действие/«руку» под надзором — [ADR-0007](../docs/adr/0007-engine-spawn-and-scheduler.md)), затем закрывается в `tasks/log.md`.
+- **Куда:** `routeLane(...).lane === "task"` → файл в `raw/.tasks/inbox/` + **одна** строка в тонкий `tasks/log.md`. Выполняется **реактивно** (движок может предложить действие/«руку» под надзором — [ADR-0007](../docs/adr/0007-engine-spawn-and-scheduler.md)), затем закрывается в `tasks/log.md`.
 - **Чора НЕ знание.** Реактивная задача **не заводится** как idea/concept/growth/person (это не модель развития, §3) и **не судится на важность** (§8b её не касается — у неё нет банд high/medium/low). Лейн задач параллелен оси важности, не подчинён ей.
 - **vs датированные `reminders/` (§5).** Есть дата/срок/повтор/«напомни»/день рождения/дедлайн → это **reminder** (§5), а не лейн задач. Лейн задач — для бессрочных чор. Не путать: датированное → `reminders/`, бессрочно-реактивное → `raw/.tasks/`.
 - **Роутер консервативен в сторону ЗНАНИЯ** ([ADR-0011](../docs/adr/0011-relevance-sensitivity-filter.md)): дивертит только при форме «императив + действие-объект» (`task_shape: imperative_plus_object`). Плоское «buy» в «buy back my time by delegating» — это **рост**, не покупка, и остаётся знанием. На сомнении — `dual_route == True`: запись идёт **и** в `tasks/log.md`, **и** видима для compile (§8b) — ростовой сигнал **никогда** не теряется как чора.
 - **Карантин побеждает лейн** (§8b): чувствительная чора уходит в `raw/.quarantine/`, а **не** в `raw/.tasks/` — изоляция важнее реактивной обработки.
 - **Edge-case подарка.** Один входящий («подарить Ивану виски на др») может дать **И** запись в лейн задач (чора «купить»), **И** claim о человеке (`people/ivan-primer.md`: предпочтение → идея подарка, §3.4) — это легитимный дуал-выход, а не дубль. Дата др при этом → `reminders/` (§5). Не схлопывать в одну диспозицию.
-- **Исключение из compile.** `raw/.tasks/` — поддиректория внутри иммутабельного `raw/`, **исключается** из compile/query/digest/resurface наравне с карантином (§8b, §11): `should_skip_raw_path()` режет любой путь с dot-частью.
+- **Исключение из compile.** `raw/.tasks/` — поддиректория внутри иммутабельного `raw/`, **исключается** из compile/query/digest/resurface наравне с карантином (§8b, §11): `shouldSkipRawPath()` режет любой путь с dot-частью.
 
 ## 6. Маркеры human-edit `<!-- keep -->`
 
@@ -322,7 +322,7 @@ last_updated: 2026-05-31
 
 - **Обновить**, если сущность уже есть (нашлась по `title`/`aliases`/slug в `index.md`). Дописываем claim/абзац инкрементально.
 - **Создать**, если сущности нет. Минимальный frontmatter + ≥1 claim (где применимо) + `## Связанные` + строка в `index.md`. Один источник обычно раскрывается в 5–15 кросс-линкованных правок (норма паттерна), не одну мега-страницу и не россыпь огрызков.
-- **Гейт чувствительности и лейн задач — ДО контент-модели ([ADR-0011](../docs/adr/0011-relevance-sensitivity-filter.md), §8b/§5a).** Прежде чем «куда филить» по типам, прогони текст через фильтр: (1) **чувствительность** — `quarantine`/`quarantine_and_redact` → весь документ в `raw/.quarantine/<категория>/` (NSFW/чужие персданные/токсик), исключён из compile; `keep_redact_spans`/`leave_in_raw` (финансы/здоровье/право) → обычный `raw/`, только логируем; (2) **лейн задач** — `route_lane(...).lane == "task"` (бессрочная чора: купить/заказать/забронировать) → `raw/.tasks/inbox/` + строка в `tasks/log.md`, **не** заводится как знание и **не** судится на важность (§5a); карантин **побеждает** лейн. Только то, что прошло гейт как **знание**, раскладывается ниже по типам.
+- **Гейт чувствительности и лейн задач — ДО контент-модели ([ADR-0011](../docs/adr/0011-relevance-sensitivity-filter.md), §8b/§5a).** Прежде чем «куда филить» по типам, прогони текст через фильтр: (1) **чувствительность** — `quarantine`/`quarantine_and_redact` → весь документ в `raw/.quarantine/<категория>/` (NSFW/чужие персданные/токсик), исключён из compile; `keep_redact_spans`/`leave_in_raw` (финансы/здоровье/право) → обычный `raw/`, только логируем; (2) **лейн задач** — `routeLane(...).lane === "task"` (бессрочная чора: купить/заказать/забронировать) → `raw/.tasks/inbox/` + строка в `tasks/log.md`, **не** заводится как знание и **не** судится на важность (§5a); карантин **побеждает** лейн. Только то, что прошло гейт как **знание**, раскладывается ниже по типам.
 - **Куда филить (классификация по контент-модели [ADR-0010](../docs/adr/0010-wiki-content-model.md)):** факт о человеке → `people/`; замысел/«подумать» → `ideas/`; усвоенная модель/принцип → `concepts/`; цель/маркер/привычка → `growth/`; **что предметно построил** → `projects/` (+ обновить `capability-profile.md`, §3.6); предпочтение обо мне → `profile.md`; недотянувшая мысль дня → `journal/`; дата/срок → `reminders/` (§5); **бессрочная реактивная чора** → лейн задач `raw/.tasks/` (§5a); **чувствительное-нежелательное** → `raw/.quarantine/` (§8b). Технический диалог → выжимка в `projects/`, полные детали — в `raw/` (§3.5), **не** код в прозу.
 - **Дедуп людей/идей/концепций (обязателен).** Перед созданием person — искать по `aliases`/имени; нашёл вариант («Ваня» ↔ «Иван Пример») → дополнить существующую, имя-вариант внести в `aliases:`, **не** плодить вторую. То же для идей и концепций (похожая формулировка → одна страница, не дубль).
 - **Кросс-линки — где паттерн бьёт RAG.** Создавая/обновляя страницу, связывай её с релевантными (человек ↔ идея ↔ концепция ↔ маркер развития ↔ проект ↔ journal-день) через `## Связанные`. Орфан без входящих ссылок — сигнал линту (§9).
@@ -331,7 +331,7 @@ last_updated: 2026-05-31
 
 Экспорт чатов со **всеми LLM** (ChatGPT/Claude/Grok) — основной источник контент-модели, с **постоянной инкрементальной подгрузкой** по watermark ([research/data-ingestion.md](../docs/research/data-ingestion.md)). Конвейер (в приватном репо, через ingest-workflow [AGENTS.md](../AGENTS.md)):
 
-1. `llm_chat`-коннектор (`ingest/`) парсит экспорт → каждое сообщение через `sanitize_text()` → пишет в `raw/llm-chat/<provider>-<date>.md` с provenance-frontmatter. Это **полные** детали (источник истины), сюда же ложится код целиком.
+1. `llm_chat`-коннектор ([`src/ingest/llm-chat.ts`](../src/ingest/llm-chat.ts)) парсит экспорт → каждое сообщение через `sanitizeText()` → пишет в `raw/llm-chat/<provider>-<date>.md` с provenance-frontmatter. Это **полные** детали (источник истины), сюда же ложится код целиком.
 2. Движок читает **дельту** `raw/llm-chat/` (от watermark) + `wiki/index.md`. Сепарирует диалог по контент-модели:
    - **замысел/«хочу сделать»** → `ideas/`;
    - **усвоенный принцип/ментальная модель** (что я понял в ходе диалога) → `concepts/`;
@@ -345,13 +345,13 @@ last_updated: 2026-05-31
 
 ## 8b. Фильтр чувствительности и релевантности ([ADR-0011](../docs/adr/0011-relevance-sensitivity-filter.md))
 
-Между write-path (§2 sanitizer) и compile (§8a) стоит фильтр на **двух ортогональных осях + лейн задач** — он НИКОГДА не сливается в один гейт «выкинуть плохое/ненужное». Tunable-источник всех порогов/категорий/действий — [`compiler/relevance-policy.md`](../compiler/relevance-policy.md) (публичная схема + дефолты; приватные лексиконы/имена — в `llm-wiki-content/.filter-policy.local.json`, мёрджатся в рантайме). API уже реализован в [ingest/classifier.py](../ingest/classifier.py) — движок **импортирует**, не переписывает: `classify_sensitivity()`, `route_lane()`, `should_skip_raw_path()`, `filter_log_record()`, `load_policy()`.
+Между write-path (§2 sanitizer) и compile (§8a) стоит фильтр на **двух ортогональных осях + лейн задач** — он НИКОГДА не сливается в один гейт «выкинуть плохое/ненужное». Tunable-источник всех порогов/категорий/действий — [`compiler/relevance-policy.md`](../compiler/relevance-policy.md) (публичная схема + дефолты; приватные лексиконы/имена — в `llm-wiki-content/.filter-policy.local.json`, мёрджатся в рантайме). API уже реализован в [src/ingest/classifier.ts](../src/ingest/classifier.ts) — движок **импортирует**, не переписывает: `classifySensitivity()`, `routeLane()`, `shouldSkipRawPath()`, `filterLogRecord()`, `loadPolicy()`.
 
 ### Порядок решения (строго по очереди)
 
-1. **sanitize** (§2) — `sanitize_text()` маскирует секреты/PII *до* всего. Fail-closed: сбой → запись отменена целиком.
-2. **sensitivity** — `classify_sensitivity(text, source_meta)` → `(label, action, tier, ...)`. Чувствительная ось fail-**to-quarantine** (в отличие от sanitizer fail-**closed**). v1 — только детерминированный **Tier-1** (`source_class` + `domain_blocklist` + opt-in `lexicon`); ML-модель **отложена** ([ADR-0011](../docs/adr/0011-relevance-sensitivity-filter.md), без embedder — [ADR-0002](../docs/adr/0002-no-embedder-pure-karpathy.md)).
-3. **lane** — `route_lane(text, source_meta)` → задача vs знание (§5a). **Карантин с шага 2 побеждает лейн.**
+1. **sanitize** (§2) — `sanitizeText()` маскирует секреты/PII *до* всего. Fail-closed: сбой → запись отменена целиком.
+2. **sensitivity** — `classifySensitivity(text, sourceMeta)` → `{label, action, tier, ...}`. Чувствительная ось fail-**to-quarantine** (в отличие от sanitizer fail-**closed**). v1 — только детерминированный **Tier-1** (`source_class` + `domain_blocklist` + opt-in `lexicon`); ML-модель **отложена** ([ADR-0011](../docs/adr/0011-relevance-sensitivity-filter.md), без embedder — [ADR-0002](../docs/adr/0002-no-embedder-pure-karpathy.md)).
+3. **lane** — `routeLane(text, sourceMeta)` → задача vs знание (§5a). **Карантин с шага 2 побеждает лейн.**
 4. **importance** — только для знания (не для задач, не для карантина): продолжает решение compile «промоутить-vs-оставить» (§8a).
 
 ### Четыре глагола диспозиции
@@ -372,11 +372,11 @@ last_updated: 2026-05-31
 
 ### Compile обязан исключать поддиректории-с-точкой
 
-`raw/.quarantine/` и `raw/.tasks/` — поддиректории **внутри** иммутабельного `raw/`. **`rglob` сам их НЕ пропускает** — любой питон, обходящий `raw/`, обязан фильтровать через `should_skip_raw_path(path)` (P0-1: `True`, если хоть одна часть пути начинается с `.` — режет `.quarantine`, `.tasks`, `.watermarks`). compile/query/digest/resurface их явно **исключают** (§11).
+`raw/.quarantine/` и `raw/.tasks/` — поддиректории **внутри** иммутабельного `raw/`. **Рекурсивный обход каталога сам их НЕ пропускает** — любой код, обходящий `raw/`, обязан фильтровать через `shouldSkipRawPath(path)` (P0-1: `true`, если хоть одна часть пути начинается с `.` — режет `.quarantine`, `.tasks`, `.watermarks`). compile/query/digest/resurface их явно **исключают** (§11).
 
 ### Аудит каждой не-обычной диспозиции
 
-Любая диспозиция, кроме `normal`-промоута знания, → **одна** JSON-строка в append-only `raw/.filter-log.jsonl` (приватный репо) через `filter_log_record(raw_path, clf, axis=..., lane=..., policy_version=...)` — **только** категория/score/provenance/sha256, **НИКОГДА содержимое** + человекочитаемая строка в `log.md` с verb `filter` (§10). Дайджест и карантин-ревью читают **лог/метаданные, не тела** (изоляция инъекций, P0-2): путь, категория, score, hash, одна санитизированная строка-семпл — никогда тело карантина; ревью обязательно/по SLA, батчится (рейт-лимит уведомлений, но **ни один айтем не подавляется**).
+Любая диспозиция, кроме `normal`-промоута знания, → **одна** JSON-строка в append-only `raw/.filter-log.jsonl` (приватный репо) через `filterLogRecord(rawPath, clf, { axis, lane, policyVersion })` — **только** категория/score/provenance/sha256, **НИКОГДА содержимое** + человекочитаемая строка в `log.md` с verb `filter` (§10). Дайджест и карантин-ревью читают **лог/метаданные, не тела** (изоляция инъекций, P0-2): путь, категория, score, hash, одна санитизированная строка-семпл — никогда тело карантина; ревью обязательно/по SLA, батчится (рейт-лимит уведомлений, но **ни один айтем не подавляется**).
 
 > **Privacy-max.** `engine_classification: off` в политике полностью отключает облачную классификацию важности; пограничное → карантин на ручное ревью.
 
@@ -394,7 +394,7 @@ last_updated: 2026-05-31
 - **Дрейф capability-profile:** в `projects/` появились/изменились `skills:`, не отражённые в `capability-profile.md` → предложить пересборку деривативной страницы (§3.6).
 - **(Наблюдаемость trip-wire ADR-0002)** при росте корпуса логировать в `log.md`, какие страницы движок выбирал на запрос; устойчивый wrong-page-rate / `index.md` > ~40–50K токенов → сигнал к лексическому FTS5 (не вектора — [research/memory-architecture.md](../docs/research/memory-architecture.md)).
 
-Линт **публичного** репо — отдельный, кодовый: [scheduler/lint_public.py](../scheduler/) (`scan_secrets`, exit≠0). См. [AGENTS.md](../AGENTS.md).
+Линт **публичного** репо — отдельный, кодовый: [src/scheduler/lint-public.ts](../src/scheduler/lint-public.ts) (`scanSecrets`, exit≠0). См. [AGENTS.md](../AGENTS.md).
 
 ## 10. Upkeep `index.md` и `log.md`
 
@@ -414,7 +414,7 @@ last_updated: 2026-05-31
 - [Иван Пример](people/ivan-primer.md) — друг, бывший коллега; др 12 апр.   # саммари КОНКРЕТНОЕ
 
 ## Проекты
-- [Telegram-мост «Второй мозг»](projects/secondbrain-bridge.md) — async-Python, FastAPI, owner-allow-list.
+- [Telegram-мост «Второй мозг»](projects/secondbrain-bridge.md) — TypeScript/Node, Fastify, owner-allow-list.
 
 ## Профиль способностей
 - [capability-profile.md](capability-profile.md) — сводка компетенций из проектов.
@@ -443,7 +443,7 @@ Verbs: `ingest` · `note` (capture) · `query` · `audit` (proactive digest) · 
 - **Не редактирует [`compiler/relevance-policy.md`](../compiler/relevance-policy.md) автономно** ([ADR-0011](../docs/adr/0011-relevance-sensitivity-filter.md), §8b): политика фильтра — tunable владельцем, изменения только обычным git-diff'ом (ревью + откат), движок их не вносит сам.
 - **Нет хард-delete** (§8b): `raw/` иммутабелен, «drop» = «не промоутить в `wiki/`», файлы не удаляются; карантин — перемещение в `raw/.quarantine/`, не уничтожение.
 - **Toxic/абьюз и важность-о-человеке — никогда не авто-дроп** ([ADR-0011](../docs/adr/0011-relevance-sensitivity-filter.md), §8b): токсик → карантин (`auto_drop: false`), важность-о-человеке → консервативно храним + одобрение владельца (`person_importance`), не молчаливый drop.
-- **compile/query/digest/resurface ОБЯЗАНЫ исключать `raw/.quarantine/` + `raw/.tasks/`** (P0-1, §8b/§5a): `rglob` сам dot-папки не режет — фильтровать через `should_skip_raw_path()`; ревью/дайджест читают метаданные/лог, не тела (P0-2).
+- **compile/query/digest/resurface ОБЯЗАНЫ исключать `raw/.quarantine/` + `raw/.tasks/`** (P0-1, §8b/§5a): рекурсивный обход каталога сам dot-папки не режет — фильтровать через `shouldSkipRawPath()`; ревью/дайджест читают метаданные/лог, не тела (P0-2).
 
 ## Связанные
 
@@ -451,4 +451,4 @@ Verbs: `ingest` · `note` (capture) · `query` · `audit` (proactive digest) · 
 - [docs/adr/0008-engine-claude-native.md](../docs/adr/0008-engine-claude-native.md) · [docs/adr/0009-tos-safe-engine-access.md](../docs/adr/0009-tos-safe-engine-access.md) · [docs/adr/0010-wiki-content-model.md](../docs/adr/0010-wiki-content-model.md)
 - [docs/adr/0002-no-embedder-pure-karpathy.md](../docs/adr/0002-no-embedder-pure-karpathy.md) · [docs/adr/0007-engine-spawn-and-scheduler.md](../docs/adr/0007-engine-spawn-and-scheduler.md)
 - [docs/research/memory-architecture.md](../docs/research/memory-architecture.md) · [docs/research/data-ingestion.md](../docs/research/data-ingestion.md)
-- [ingest/sanitizer.py](../ingest/sanitizer.py) · [ingest/watermark.py](../ingest/) · [scheduler/lint_public.py](../scheduler/)
+- [src/ingest/sanitizer.ts](../src/ingest/sanitizer.ts) · [src/ingest/watermark.ts](../src/ingest/watermark.ts) · [src/scheduler/lint-public.ts](../src/scheduler/lint-public.ts)

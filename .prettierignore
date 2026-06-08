@@ -1,0 +1,8 @@
+dist/
+node_modules/
+wiki-example/
+docs/
+compiler/
+*.md
+*.py
+pnpm-lock.yaml

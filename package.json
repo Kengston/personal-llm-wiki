@@ -1,0 +1,44 @@
+{
+	"name": "personal-llm-wiki",
+	"version": "0.1.0",
+	"description": "Personal LLM-wiki framework — Claude-native second brain (Telegram bridge, ingest, scheduler, no embedder). TypeScript port.",
+	"private": true,
+	"type": "module",
+	"engines": {
+		"node": ">=24.0.0"
+	},
+	"packageManager": "pnpm@9.12.3",
+	"scripts": {
+		"build": "tsc -p tsconfig.build.json",
+		"start": "node dist/bridge/main.js",
+		"dev": "tsx watch src/bridge/main.ts",
+		"sweep": "node dist/scheduler/digest.js",
+		"routine": "node dist/scheduler/routines.js",
+		"lint:public": "node dist/scheduler/lint-public.js --root .",
+		"lint": "eslint .",
+		"format": "prettier --write \"src/**/*.ts\"",
+		"typecheck": "tsc --noEmit",
+		"test": "vitest run"
+	},
+	"dependencies": {
+		"dotenv-flow": "^4.1.0",
+		"fastify": "^4.28.1",
+		"js-yaml": "^4.1.0",
+		"luxon": "^3.5.0",
+		"pino": "^9.5.0",
+		"pino-pretty": "^11.3.0",
+		"rrule": "^2.8.1",
+		"zod": "^3.23.8"
+	},
+	"devDependencies": {
+		"@types/js-yaml": "^4.0.9",
+		"@types/luxon": "^3.4.2",
+		"@types/node": "^22.10.1",
+		"eslint": "^9.16.0",
+		"prettier": "^3.4.2",
+		"tsx": "^4.19.2",
+		"typescript": "^5.6.3",
+		"typescript-eslint": "^8.18.0",
+		"vitest": "^2.1.8"
+	}
+}

@@ -3,25 +3,22 @@
 <!--
   ru.secondbrain.bridge.plist — LaunchAgent для моста Telegram <-> движок (Claude).
 
-  Держит uvicorn-процесс моста живым (KeepAlive: автоперезапуск при падении) и
-  стартует при логине. Это LaunchAgent (per-user), а НЕ LaunchDaemon — в v1 хост
-  это MacBook владельца, без always-on-root-демона ([ADR-0005], [ADR-0007]).
+  Держит node-процесс моста живым (KeepAlive: автоперезапуск при падении) и
+  стартует при логине. LaunchAgent (per-user), а НЕ LaunchDaemon — в v1 хост это
+  MacBook владельца, без always-on-root-демона ([ADR-0005], [ADR-0007]).
 
-  NB про слои исполнения: этот plist обслуживает РЕАКТИВНЫЙ слой (Telegram → bridge →
-  движок). Плановый слой (compile/digest/lint/web-research) — отдельно: локально
-  через scheduler/ (launchd), а 24/7-апгрейд — remote Claude routines над приватным
-  GitHub-репо (работают даже при спящем Mac) — [ADR-0005], [CONTEXT §4].
+  TypeScript-порт ([ADR-0012]): мост — Fastify на Node (dist/bridge/main.js), не
+  FastAPI/uvicorn. СНАЧАЛА собери: pnpm install && pnpm build (tsc → dist/).
 
   УСТАНОВКА (детали — в setup/SETUP.md, ставит человек, не код):
-    1. Замени ВСЕ плейсхолдеры __...__ на реальные абсолютные пути этой машины.
-    2. Скопируй файл в ~/Library/LaunchAgents/ru.secondbrain.bridge.plist
+    1. Замени плейсхолдеры __...__ на реальные абсолютные пути этой машины.
+    2. Скопируй в ~/Library/LaunchAgents/ru.secondbrain.bridge.plist
     3. launchctl load -w ~/Library/LaunchAgents/ru.secondbrain.bridge.plist
     4. Проверка: launchctl list | grep ru.secondbrain.bridge
                  curl http://127.0.0.1:8080/health
 
-  ВАЖНО про секреты: НЕ хардкодим токены в этот plist. Мост читает их из .env в
-  WorkingDirectory (или из EnvironmentVariables, если решишь так). Этот файл —
-  публичный пример, реальные значения сюда не попадают.
+  ВАЖНО про секреты: НЕ хардкодим токены в plist. Мост читает их из .env в
+  WorkingDirectory (dotenv-flow). Этот файл — публичный пример.
 -->
 <plist version="1.0">
 <dict>
@@ -29,31 +26,24 @@
     <key>Label</key>
     <string>ru.secondbrain.bridge</string>
 
-    <!-- Команда запуска: uvicorn поднимает app:app на localhost:порт.
-         Перед Cloudflare Tunnel мост слушает только loopback (127.0.0.1).
-         Замени __PYTHON_BIN__ на путь к python из venv моста (см. SETUP.md),
-         например /Users/example/llm-wiki/bridge/.venv/bin/python -->
+    <!-- Команда запуска: node поднимает Fastify-мост (dist/bridge/main.js).
+         main.ts слушает 127.0.0.1:BRIDGE_PORT (дефолт 8080) — перед Cloudflare
+         Tunnel мост слушает только loopback. Замени __NODE_BIN__ на путь к node
+         (напр. /opt/homebrew/bin/node), __REPO_DIR__ — на корень публичного репо. -->
     <key>ProgramArguments</key>
     <array>
-        <string>__PYTHON_BIN__</string>
-        <string>-m</string>
-        <string>uvicorn</string>
-        <string>app:app</string>
-        <string>--host</string>
-        <string>127.0.0.1</string>
-        <string>--port</string>
-        <string>8080</string>
+        <string>__NODE_BIN__</string>
+        <string>__REPO_DIR__/dist/bridge/main.js</string>
     </array>
 
-    <!-- Рабочая директория = папка bridge/ (тут лежат app.py и .env). -->
+    <!-- Рабочая директория = корень публичного репо (тут dist/ и .env, gitignored).
+         main.ts грузит .env через dotenv-flow из cwd. -->
     <key>WorkingDirectory</key>
-    <string>__BRIDGE_DIR__</string>
+    <string>__REPO_DIR__</string>
 
-    <!-- Минимальное окружение. Полную конфигурацию мост берёт из .env в
-         WorkingDirectory; здесь задаём только то, без чего uvicorn не стартует.
+    <!-- Минимальное окружение. Полную конфигурацию мост берёт из .env;
          PATH нужен, чтобы дочерний официальный бинарь `claude` нашёлся (поправь под
-         Homebrew-префикс: Apple Silicon — /opt/homebrew/bin, Intel — /usr/local/bin;
-         если claude установлен иначе — добавь его каталог в PATH). -->
+         Homebrew-префикс: Apple Silicon — /opt/homebrew/bin, Intel — /usr/local/bin). -->
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
@@ -64,7 +54,7 @@
     <key>RunAtLoad</key>
     <true/>
 
-    <!-- Автоперезапуск при падении (фаза-7 hardening pachca-плана). -->
+    <!-- Автоперезапуск при падении. -->
     <key>KeepAlive</key>
     <true/>
 
@@ -72,10 +62,10 @@
     <key>ThrottleInterval</key>
     <integer>10</integer>
 
-    <!-- Логи stdout/stderr в файлы (structlog пишет в stdout). Создай папку logs/. -->
+    <!-- Логи stdout/stderr в файлы (pino пишет в stdout). Создай папку logs/. -->
     <key>StandardOutPath</key>
-    <string>__BRIDGE_DIR__/logs/bridge.out.log</string>
+    <string>__REPO_DIR__/logs/bridge.out.log</string>
     <key>StandardErrorPath</key>
-    <string>__BRIDGE_DIR__/logs/bridge.err.log</string>
+    <string>__REPO_DIR__/logs/bridge.err.log</string>
 </dict>
 </plist>

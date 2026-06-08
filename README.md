@@ -52,7 +52,7 @@ The result is a system you could actually run for yourself, and a portfolio piec
 flowchart LR
   subgraph Reactive["① Reactive — you ask"]
     U["You<br/>(Telegram)"] -->|"message + secret_token"| CF["Cloudflare<br/>Tunnel"]
-    CF --> BR["Bridge<br/>FastAPI ~150 LOC"]
+    CF --> BR["Bridge<br/>Fastify ~150 LOC"]
     BR -->|"allow-list owner chat_id"| ENG{{"Engine<br/>(ClaudeEngine)"}}
   end
   subgraph Scheduled["② Scheduled — routines"]
@@ -72,7 +72,7 @@ flowchart LR
 
 The engine runs across **three execution layers** ([ADR-0008](docs/adr/0008-engine-claude-native.md)):
 
-- **① Reactive (Telegram → bridge → engine).** A message hits the Telegram Bot API, travels through a Cloudflare Tunnel to a tiny FastAPI bridge on your Mac. The bridge validates the webhook secret, **hard-drops anything that is not from your own `chat_id`** (single-user, [ADR-0009](docs/adr/0009-tos-safe-engine-access.md)), then spawns one short-lived `claude -p` (resuming the chat's session via `--resume`) which reads/edits the private wiki and answers. A bare message is *captured* into the wiki; a question is answered from it.
+- **① Reactive (Telegram → bridge → engine).** A message hits the Telegram Bot API, travels through a Cloudflare Tunnel to a tiny **Fastify** bridge on your Mac. The bridge validates the webhook secret, **hard-drops anything that is not from your own `chat_id`** (single-user, [ADR-0009](docs/adr/0009-tos-safe-engine-access.md)), then spawns one short-lived `claude -p` (resuming the chat's session via `--resume`) which reads/edits the private wiki and answers. A bare message is *captured* into the wiki; a question is answered from it.
 - **② Scheduled (routine / launchd → `claude -p`).** A schedule wakes the engine for routine work: **compile** the wiki overnight, a morning **digest + reminders** sweep, weekly **lint**, planned **web-research**, and **idea-resurfacing**. Locally this is `launchd`; the 24/7 upgrade is **remote Claude routines**, which run even while the Mac is asleep because they operate on the private GitHub repo. (A Telegram bot cannot DM you first — so you send `/start` once, the bridge remembers your `chat_id`, and pushes flow forever.)
 - **③ Event (new file in `raw/` → compile).** Dropping a freshly-sanitized source into `raw/` triggers an incremental compile so the wiki stays current without waiting for the nightly routine.
 - **Ingest.** Connectors turn your data — **chats from all LLMs** (ChatGPT/Claude/Grok) first, then Telegram export, VK, WhatsApp, YouTube history, X archive — into sanitized Markdown in `raw/`, through a **fail-closed sanitizer** that masks secrets/PII *before* anything is written.
@@ -87,7 +87,7 @@ The agent that maintains the wiki is **Claude Code in headless mode** — the **
 
 **ToS-safe by construction.** The engine is reached *only* through the official binary, never by scraping or reusing the subscription OAuth token inside a custom/third-party HTTP client — that is exactly the pattern Anthropic blocked in early 2026 (the banned "OpenClaw" route). The bridge is **single-user**: it hard allow-lists the owner's Telegram `chat_id` and drops everything else, keeping the system squarely inside "ordinary individual use" ([ADR-0009](docs/adr/0009-tos-safe-engine-access.md)). Note on cost: from **2026-06-15**, scripted Claude Code / Agent SDK use on a subscription draws from a monthly **Agent-SDK credit** (~$100/mo on Max-5x, per user); generous for personal scale, overage at API rates.
 
-**Engine-portable seam.** The engine sits behind a one-function abstraction — `run_engine(prompt, session_id | None) -> (answer, new_session_id, usage)` — with an abstract `Engine` base and **`ClaudeEngine` as the default**. Two **deferred adapter slots** ship alongside it, added by config without rewriting the bridge: **`CodexEngine`** (`codex exec`, the portable fallback) and **`GrokEngine`** (backends: `grok -p --output-format json` via grok-build-cli, or OpenClaw — which is sanctioned by xAI for Grok **only**, never for Claude, per [ADR-0009](docs/adr/0009-tos-safe-engine-access.md)). Grok is intended as an optional later *advisor voice* for A/B life-advice. The pattern is **spawn-fresh-per-task**: one short-lived process per message, routine or event — never a resident daemon (this sidesteps the live-session-dies-on-token-expiry class of bug). Spawn/scheduler details are in [ADR-0007](docs/adr/0007-engine-spawn-and-scheduler.md).
+**Engine-portable seam.** The engine sits behind a one-method abstraction — `engine.run(prompt, session_id | null) -> { answer, sessionId, usage }` — with an abstract `Engine` base and **`ClaudeEngine` as the default**. Two **deferred adapter slots** ship alongside it, added by config without rewriting the bridge: **`CodexEngine`** (`codex exec`, the portable fallback) and **`GrokEngine`** (backends: `grok -p --output-format json` via grok-build-cli, or OpenClaw — which is sanctioned by xAI for Grok **only**, never for Claude, per [ADR-0009](docs/adr/0009-tos-safe-engine-access.md)). Grok is intended as an optional later *advisor voice* for A/B life-advice. The pattern is **spawn-fresh-per-task**: one short-lived process per message, routine or event — never a resident daemon (this sidesteps the live-session-dies-on-token-expiry class of bug). Spawn/scheduler details are in [ADR-0007](docs/adr/0007-engine-spawn-and-scheduler.md).
 
 ---
 
@@ -100,7 +100,7 @@ The project is split across **two git repositories** so that the framework can b
 | **`personal-llm-wiki`** (this) | public | Framework only: the compiler contract, the bridge code, ingest scripts, the scheduler, concept docs, a **synthetic example wiki**, README/SETUP. Zero personal facts, zero secrets, zero real contacts. This is the portfolio. |
 | **`llm-wiki-content`** | private | Your data: `raw/` (immutable sanitized snapshots), `wiki/` (pages about you), `reminders/`. Secrets only in `.env` (gitignored). |
 
-The boundary is enforced in depth: a **fail-closed sanitizer** on the write-path masks secrets/PII before anything lands in `raw/`, and [`scheduler/lint_public.py`](scheduler/) scans the public repo for secret/PII patterns and exits non-zero on a hit (CI gate). Every example in this repo is synthetic and clearly labelled — see [`wiki-example/`](wiki-example/), populated with obviously-fake names like *Иван Пример*.
+The boundary is enforced in depth: a **fail-closed sanitizer** on the write-path masks secrets/PII before anything lands in `raw/`, and [`src/scheduler/lint-public.ts`](src/scheduler/) (run via `pnpm lint:public` after a build) scans the public repo for secret/PII patterns and exits non-zero on a hit (CI gate). Every example in this repo is synthetic and clearly labelled — see [`wiki-example/`](wiki-example/), populated with obviously-fake names like *Иван Пример*.
 
 ---
 
@@ -120,13 +120,13 @@ The wiki is a "second brain" *about the owner*, so its heart is **concepts, pers
 
 Follow **[`setup/SETUP.md`](setup/SETUP.md)** end to end. In short:
 
-1. **Install** the toolchain — `brew install gh cloudflared` plus the official `claude` CLI, Python 3.11+.
+1. **Install** the toolchain — `brew install gh cloudflared node pnpm` plus the official `claude` CLI (the framework is **Node 24 + TypeScript**, [ADR-0012](docs/adr/0012-language-typescript-port.md)); then `pnpm install && pnpm build` in this repo.
 2. **Authenticate the engine** — log in to **Claude Code** under your Claude Max subscription (the official binary; never expose the OAuth token to a custom client — [ADR-0009](docs/adr/0009-tos-safe-engine-access.md)), and review your data/privacy controls *before* your first ingest.
 3. **Create the bot** — talk to `@BotFather`, get the token, send `/start` once to capture your owner `chat_id`.
-4. **Configure** — copy `.env.example` to `.env` in both repos and fill the placeholders (bot token, owner chat id, webhook secret, repo paths).
-5. **Run the bridge** — start the FastAPI app and a `cloudflared` tunnel; point the Telegram webhook at it.
-6. **Load the routines** — `launchctl load` the digest-sweep and lint agents locally; optionally promote them to remote Claude routines for 24/7 operation on the private repo.
-7. **First ingest** — run an `ingest/` connector (LLM-chat export first, then a Telegram Desktop `result.json`) and watch the engine compile it into your private wiki.
+4. **Configure** — copy `bridge/.env.example` to a gitignored `.env` (loaded by `dotenv-flow` from the repo root) and fill the placeholders (bot token, owner chat id, webhook secret, repo paths).
+5. **Run the bridge** — start the Fastify app (`pnpm start` → `node dist/bridge/main.js`) and a `cloudflared` tunnel; point the Telegram webhook at it.
+6. **Load the routines** — `launchctl bootstrap` the digest-sweep and lint agents locally (they run `node dist/...`); optionally promote them to remote Claude routines for 24/7 operation on the private repo.
+7. **First ingest** — run an `ingest/` connector (`node dist/ingest/llm-chat.js …` first, then `node dist/ingest/telegram-export.js …` on a Telegram Desktop `result.json`) and watch the engine compile it into your private wiki.
 
 The synthetic [`wiki-example/`](wiki-example/) lets you read the page format and the "agent maintains a wiki" git history *without any setup at all*.
 
@@ -134,33 +134,43 @@ The synthetic [`wiki-example/`](wiki-example/) lets you read the page format and
 
 ## Repository map
 
+> The framework is **TypeScript** (Node 24, strict ESM) — a behavior-preserving port from Python ([ADR-0012](docs/adr/0012-language-typescript-port.md), mirroring the author's `abcage-mcp-hub` house style): Fastify + pino + zod + dotenv-flow + `node:sqlite` + luxon + rrule + vitest, managed with `pnpm`. Sources live under `src/`, compiled to `dist/` with `pnpm build`.
+
 ```
 personal-llm-wiki/
 ├── README.md                 ← you are here (portfolio-facing, English)
 ├── LICENSE                   MIT
+├── package.json              pnpm scripts (build/dev/test/lint:public/typecheck) + deps
 ├── CONTEXT.md                living project context: scope, invariants, terminology
 ├── CLAUDE.md                 the compiler schema the engine reads (AGENTS.md mirror)
 ├── AGENTS.md                 engine-agnostic mirror of the compiler schema
 ├── compiler/
 │   └── rules.md              the wiki-maintenance contract: page format, frontmatter,
 │                             ingest/query/lint workflows, sanitizer rules, writeback
-├── bridge/                   Telegram ⇄ engine FastAPI bridge
-│                             webhook + HMAC validation + owner-chat allow-list,
-│                             SQLite chat_sessions, engine-portable runner
-│                             (ClaudeEngine default; Grok/Codex deferred slots),
-│                             Bot API client, /health, structlog, launchd .plist
-├── ingest/                   data → sanitized Markdown
-│                             sanitizer.py (SHARED: secret/PII masking),
-│                             llm_chat.py (ChatGPT/Claude/Grok exports), telegram_export.py,
-│                             watermark.py, connector stubs: vk / whatsapp / youtube_takeout / x_archive / codebase_graphify
-├── scheduler/                scheduled routines (digest/reminder sweep, compile, web-research,
-│                             idea-resurfacing) + lint_public.py (PII/secret gate), launchd .plist files
+├── src/                      TypeScript sources (compiled to dist/ via `pnpm build`)
+│   ├── bridge/               Telegram ⇄ engine Fastify bridge
+│   │                         app.ts (webhook + HMAC + owner-chat allow-list),
+│   │                         engine.ts (spawn via node:child_process; ClaudeEngine
+│   │                         default, Grok/Codex deferred slots), store.ts
+│   │                         (node:sqlite chat_sessions), telegram.ts (Bot API),
+│   │                         config.ts, queue.ts, main.ts (entry → dist/bridge/main.js)
+│   ├── ingest/               data → sanitized Markdown
+│   │                         sanitizer.ts (SHARED: secret/PII masking),
+│   │                         classifier.ts (ADR-0011 sensitivity + task/knowledge router),
+│   │                         llm-chat.ts (ChatGPT/Claude/Grok exports), telegram-export.ts,
+│   │                         watermark.ts  (vk/whatsapp/youtube/x/codebase connectors: deferred)
+│   ├── scheduler/            reminders.ts (RRULE/Leitner), digest.ts (sweep), routines.ts
+│   │                         (dispatcher), lint-public.ts (PII/secret gate), config.ts, runner.ts
+│   └── core/
+│       └── logger.ts         pino logger
+├── bridge/ · ingest/ · scheduler/   module docs (README / reminders_spec) + launchd .plist + shell wrappers (run `node dist/...`)
+├── dist/                     compiled JS (gitignored) — what launchd / `pnpm start` actually run
 ├── wiki-example/             SYNTHETIC example wiki (all fake, clearly labelled)
 │                             index.md, log.md, concepts/, ideas/, growth/, people/,
 │                             projects/, capability-profile, reminders/
 ├── setup/SETUP.md            interactive activation runbook
 └── docs/
-    ├── adr/                  architecture decision records (0001–0010)
+    ├── adr/                  architecture decision records (0001–0012)
     ├── architecture/         architecture.md — diagrams, data-flow, threat model
     └── research/             the pre-build research report (7 directions)
 ```
@@ -183,6 +193,8 @@ Decisions are captured as **ADRs** — short, dated, not rewritten (superseded i
 | [0008](docs/adr/0008-engine-claude-native.md) | **Engine = Claude-native** (official `claude` binary), engine-portable; Grok/Codex are deferred adapter slots. **Supersedes [0001](docs/adr/0001-engine-subscription-codex.md).** |
 | [0009](docs/adr/0009-tos-safe-engine-access.md) | **ToS-safe engine access** — official binary only, single-user owner allow-list, never reuse the OAuth token in a third-party client; Agent-SDK credit from 2026-06-15. |
 | [0010](docs/adr/0010-wiki-content-model.md) | **Content model** — concepts/development/ideas first; code sessions compressed into accomplishment/capability records; ingest chats from all LLMs. |
+| [0011](docs/adr/0011-relevance-sensitivity-filter.md) | **Relevance + sensitivity filter** — two axes (on-device sensitivity, compile-time relevance) plus a task/knowledge router, sibling to the sanitizer; quarantine beats lane. |
+| [0012](docs/adr/0012-language-typescript-port.md) | **Implementation language = TypeScript** (Node 24, strict ESM) — behavior-preserving port from Python, mirroring the `abcage-mcp-hub` stack; language is non-load-bearing, invariants carried by behavior + tests. Supersedes nothing (language was never a fixed decision). |
 
 ---
 

@@ -26,6 +26,10 @@ venv/
 
 # Node
 node_modules/
+dist/
+*.tsbuildinfo
+pnpm-debug.log*
+npm-debug.log*
 
 # OS / editor
 .DS_Store

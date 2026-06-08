@@ -34,7 +34,7 @@ sources:
 
 | # | Фаза | Где | ~Время | Блокирует |
 |---|---|---|---|---|
-| 0 | Prerequisites (Homebrew, Node/Python, FileVault) | mac | ~10 мин | всё |
+| 0 | Prerequisites (Homebrew, Node 24 + pnpm, FileVault) | mac | ~10 мин | всё |
 | 1 | Движок: Claude Code + sign-in под Max + проверка `claude -p` | mac | ~15 мин | 4, 6, 7 |
 | 2 | `gh` + два репозитория (public/private) + push | mac + GitHub | ~25 мин | 4 |
 | 3 | Telegram-бот: @BotFather → token + `chat_id` → `.env` (`ENGINE=claude`) | Telegram | ~20 мин | 4, 5, 6, 7 |
@@ -55,16 +55,16 @@ sources:
 - Два корня репозиториев фигурируют постоянно:
   - **PUBLIC** (фреймворк-портфолио): `~/llm-wiki` → GitHub `Kengston/personal-llm-wiki` (`--public`).
   - **PRIVATE** (личный контент + секреты): `~/llm-wiki-content` → GitHub `Kengston/llm-wiki-content` (`--private`).
-- Все секреты живут **только** в `~/llm-wiki-content/.env` (gitignored). В PUBLIC-репо — ни одного реального токена/телефона/`chat_id`/email ([ADR-0003](../docs/adr/0003-two-repos-public-private.md)).
+- Секреты живут **только** в gitignored `.env`-файлах ([ADR-0003](../docs/adr/0003-two-repos-public-private.md)): мост (`dist/bridge/main.js`) грузит `.env` из **корня PUBLIC-репо** через `dotenv-flow` (файл gitignored — токены в git не попадают, [ADR-0012](../docs/adr/0012-language-typescript-port.md)); shell-обёртки планового слоя (`run_sweep.sh`/`run_routine.sh`) дополнительно подгружают **приватный** `~/llm-wiki-content/.env`. В коммиты PUBLIC-репо — ни одного реального токена/телефона/`chat_id`/email.
 - Имена сервисов launchd: `ru.secondbrain.bridge` (мост) и `ru.secondbrain.digest` (плановый дайджест+напоминания).
 
-> RU: имена env-переменных ниже совпадают с `bridge/.env.example` и тем, что читают `bridge/` и `scheduler/`: `ENGINE`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_OWNER_CHAT_ID`, `TELEGRAM_WEBHOOK_SECRET`, `WIKI_REPO_PATH`, `BRIDGE_PORT`. Не переименовывай — иначе код их не найдёт.
+> RU: имена env-переменных ниже совпадают с `.env.example` (в корне PUBLIC-репо) и тем, что читают `src/bridge/` и `src/scheduler/`: `ENGINE`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_OWNER_CHAT_ID`, `TELEGRAM_WEBHOOK_SECRET`, `WIKI_REPO_PATH`, `BRIDGE_PORT`. Не переименовывай — иначе код их не найдёт.
 
 ---
 
-## Phase 0 — Prerequisites (Homebrew, Node/Python, FileVault)
+## Phase 0 — Prerequisites (Homebrew, Node 24 + pnpm, FileVault)
 
-> Базовый инструментарий. `python3` уже стоит на машине; Claude Code (`claude`) и `gh` — ещё нет (поставим в фазах 1–2). Claude Code распространяется как npm-пакет → нужен Node.js LTS.
+> Базовый инструментарий. Claude Code (`claude`) и `gh` — ещё нет (поставим в фазах 1–2). И сам Claude Code (npm-пакет), и фреймворк («Второй мозг» — **TypeScript/Node 24**, [ADR-0012](../docs/adr/0012-language-typescript-port.md)) требуют **Node.js 24** и пакетный менеджер **pnpm**.
 
 - [ ] **0.1 Homebrew установлен.** Проверь:
   ```bash
@@ -76,12 +76,12 @@ sources:
   ```
   После установки на Apple Silicon добавь brew в PATH (установщик подскажет точные строки), затем перезапусти терминал.
 
-- [ ] **0.2 Node.js LTS присутствует** (нужен для Claude Code) и Python 3.10+ (для bridge/ingest/scheduler).
+- [ ] **0.2 Node.js 24 + pnpm присутствуют** (нужны и для Claude Code, и для самого фреймворка bridge/ingest/scheduler — [ADR-0012](../docs/adr/0012-language-typescript-port.md)).
   ```bash
-  node --version     # ожидаем v18+ (LTS); если нет — brew install node
-  python3 --version  # ожидаем 3.10+
+  node --version     # ожидаем v24.x; если нет — brew install node
+  pnpm --version     # если нет — brew install pnpm  (или: corepack enable && corepack prepare pnpm@latest --activate)
   ```
-  Если версия Python старше 3.10 — `brew install python@3.12`.
+  RU: pnpm — пакетный менеджер house-style владельца (зеркалит `abcage-mcp-hub`). Зависимости фреймворка и его сборку (`dist/`) ставим в фазе 4 (`pnpm install && pnpm build`).
 
 - [ ] **0.3 FileVault включён** (шифрование диска at-rest — baseline-контроль приватности, см. [privacy-security](../docs/research/privacy-security.md)).
   ```bash
@@ -119,16 +119,19 @@ sources:
   ```bash
   claude -p "hi" --output-format json
   ```
-  Ожидаем валидный JSON-объект. Достань из него поле с текстом ответа и `session_id`:
+  Ожидаем валидный JSON-объект. Достань из него поле с текстом ответа и `session_id` (Node уже стоит из фазы 0):
   ```bash
-  claude -p "скажи hi одним словом" --output-format json | python3 -m json.tool
+  claude -p "скажи hi одним словом" --output-format json \
+    | node -e "console.log(JSON.stringify(JSON.parse(require('fs').readFileSync(0,'utf8')),null,2))"
   ```
-  RU: мост парсит этот JSON → берёт текст результата для отправки в Telegram и `session_id` (валидный UUID) для непрерывности диалога. Непрерывность достигается флагом `--resume <session_id>` (или `--continue` для последней сессии в каталоге) на следующем ходу — см. `bridge/engine.py` (`ClaudeEngine`).
+  RU: мост парсит этот JSON → берёт текст результата для отправки в Telegram и `session_id` (валидный UUID) для непрерывности диалога. Непрерывность достигается флагом `--resume <session_id>` (или `--continue` для последней сессии в каталоге) на следующем ходу — см. `src/bridge/engine.ts` (`ClaudeEngine`).
 
 - [ ] **1.4 Проверить resume (непрерывность диалога).** Сохрани id из ответа 1.3 и продолжи им сессию:
   ```bash
-  SID=$(claude -p "запомни число 7" --output-format json | python3 -c "import sys,json; print(json.load(sys.stdin)['session_id'])")
-  claude -p "какое число я просил запомнить?" --output-format json --resume "$SID" | python3 -m json.tool
+  SID=$(claude -p "запомни число 7" --output-format json \
+    | node -e "console.log(JSON.parse(require('fs').readFileSync(0,'utf8')).session_id)")
+  claude -p "какое число я просил запомнить?" --output-format json --resume "$SID" \
+    | node -e "console.log(JSON.stringify(JSON.parse(require('fs').readFileSync(0,'utf8')),null,2))"
   ```
   Ожидаем: ответ содержит «7» → значит `--resume <id>` работает (это фундамент реактивного диалога в фазе 7).
 
@@ -165,7 +168,7 @@ sources:
     --source ~/llm-wiki --remote origin --push \
     --description "Personal LLM-wiki second brain (Karpathy pattern): Claude-native engine + Telegram bridge, no embedder."
   ```
-  > ⚠️ **Перед** этим убедись, что в `~/llm-wiki` нет личных данных (это и есть инвариант двух репо). Быстрый локальный линт PII/секретов — фаза 8 / `scheduler/lint_public.py`. Если ещё нет коммита: `git -C ~/llm-wiki init && git -C ~/llm-wiki add -A && git -C ~/llm-wiki commit -m "init framework"` перед `gh repo create`.
+  > ⚠️ **Перед** этим убедись, что в `~/llm-wiki` нет личных данных (это и есть инвариант двух репо). Быстрый локальный линт PII/секретов — фаза 8 / `pnpm lint:public` (`src/scheduler/lint-public.ts`). Если ещё нет коммита: `git -C ~/llm-wiki init && git -C ~/llm-wiki add -A && git -C ~/llm-wiki commit -m "init framework"` перед `gh repo create`.
 
 - [ ] **2.4 Подготовить PRIVATE-каталог** (личный контент). Если каталога ещё нет — создай скелет по целевому layout:
   ```bash
@@ -175,15 +178,17 @@ sources:
   Файлы `README.md`, `CLAUDE.md`, `.gitignore`, `wiki/index.md`, `reminders/` и `log.md` поставляются заготовками — убедись, что они на месте (`ls ~/llm-wiki-content`).
   RU: рабочий контекст движка для приватного репо держим в `CLAUDE.md` (Claude Code читает его как memory-файл из рабочего каталога) — это Claude-native аналог прежнего `AGENTS.md`.
 
-- [ ] **2.5 Создать `.env` из примера и заполнить позже** (значения появятся в фазах 3 и 5). Шаблон лежит в публичном репо (`bridge/.env.example`) — копируем его в **приватный** каталог:
+- [ ] **2.5 Создать `.env` из примера и заполнить позже** (значения появятся в фазах 3 и 5). Шаблон `.env.example` лежит в **корне** публичного репо. Мост грузит `.env` из корня PUBLIC-репо (`dotenv-flow`, [ADR-0012](../docs/adr/0012-language-typescript-port.md)) — этот `.env` **gitignored**, реальные токены в коммиты не попадают:
   ```bash
-  cp ~/llm-wiki/bridge/.env.example ~/llm-wiki-content/.env
+  cp ~/llm-wiki/.env.example ~/llm-wiki/.env            # для моста (корень PUBLIC, gitignored)
+  cp ~/llm-wiki/.env.example ~/llm-wiki-content/.env    # для планового слоя (run_sweep.sh читает приватный .env)
   ```
-  Проверь, что `.env` **игнорируется** git'ом в приватном репо:
+  Проверь, что **оба** `.env` **игнорируются** git'ом:
   ```bash
+  cd ~/llm-wiki         && git check-ignore .env   # должен напечатать: .env
   cd ~/llm-wiki-content && git check-ignore .env   # должен напечатать: .env
   ```
-  > ⚠️ Если `.env` НЕ игнорируется — останови всё и поправь `.gitignore` (`.env`, `*.token`, `*.sqlite`, `.DS_Store`). Секрет, попавший в git-историю, персистит во всех клонах/форках навсегда.
+  > ⚠️ Если `.env` НЕ игнорируется — останови всё и поправь `.gitignore` (`.env`, `.env.*`, `*.sqlite`, `.DS_Store`). Секрет, попавший в git-историю, персистит во всех клонах/форках навсегда. В PUBLIC-репо `.env` именно gitignored (см. `.gitignore`: `.env` + `!.env.example`).
 
 - [ ] **2.6 Создать и запушить PRIVATE-репо** (`--private`).
   ```bash
@@ -220,7 +225,8 @@ sources:
   - **Через API** (после того как ты нажал Start у *своего* бота):
     ```bash
     source ~/llm-wiki-content/.env
-    curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUpdates" | python3 -m json.tool
+    curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUpdates" \
+      | node -e "console.log(JSON.stringify(JSON.parse(require('fs').readFileSync(0,'utf8')),null,2))"
     ```
     Возьми `result[].message.chat.id`.
   > RU: для приватного 1:1-чата `chat.id == from.id` — одной константы хватает. (Если позже добавишь бота в группу — там id отличается; v1 рассчитан на личный чат.)
@@ -233,58 +239,58 @@ sources:
 
 - [ ] **3.5 Сгенерировать webhook-secret** (фаза 5 поставит его в `setWebhook`):
   ```bash
-  python3 -c "import secrets; print(secrets.token_urlsafe(48))"
+  node -e "console.log(require('node:crypto').randomBytes(32).toString('base64url'))"
   ```
   Запиши результат в `.env`:
   ```
   TELEGRAM_WEBHOOK_SECRET=<вставь_сгенерированную_строку>
   ```
-  > ⚠️ Charset секрета для Telegram ограничен `A-Z a-z 0-9 _ -` (1–256 символов). `secrets.token_urlsafe` это удовлетворяет. Длина ≥32 — против timing-атак (мост сравнивает заголовок через `hmac.compare_digest`).
+  > ⚠️ Charset секрета для Telegram ограничен `A-Z a-z 0-9 _ -` (1–256 символов). `base64url` (`randomBytes(32).toString('base64url')`) это удовлетворяет. Длина ≥32 — против timing-атак (мост сравнивает заголовок через `crypto.timingSafeEqual`, [ADR-0012](../docs/adr/0012-language-typescript-port.md)).
 
-- [ ] **3.6 Выбрать движок и указать путь к приватному репо в `.env`.** Дефолт v1 — Claude:
+- [ ] **3.6 Выбрать движок и указать путь к приватному репо в `.env`.** Дефолт v1 — Claude (эти поля нужны мосту → впиши их в `.env` корня PUBLIC-репо; те же — в приватный `.env` для планового слоя):
   ```
-  # ~/llm-wiki-content/.env
+  # .env (корень ~/llm-wiki; для планового слоя — ~/llm-wiki-content/.env)
   ENGINE=claude
   CLAUDE_BIN=claude
   WIKI_REPO_PATH=/Users/ЗАМЕНИ_МЕНЯ/llm-wiki-content   # echo ~/llm-wiki-content
   ENGINE_TIMEOUT_SEC=180
   BRIDGE_PORT=8080
   ```
-  RU: `ENGINE=claude` выбирает `ClaudeEngine` (фабрика в `bridge/engine.py`), который спавнит `claude -p "<prompt>" --output-format json [--resume <sid>]` с рабочим каталогом `WIKI_REPO_PATH`. Значения Grok/Codex (`ENGINE=grok|codex`) — отложенные, см. appendix.
+  RU: `ENGINE=claude` выбирает `ClaudeEngine` (фабрика `buildEngineFromEnv` в `src/bridge/engine.ts`), который спавнит `claude -p "<prompt>" --output-format json [--resume <sid>]` через `node:child_process` (без shell) с рабочим каталогом `WIKI_REPO_PATH`. Значения Grok/Codex (`ENGINE=grok|codex`) — отложенные, см. appendix.
 
 - [ ] **3.7 Проверить токен бота:**
   ```bash
   source ~/llm-wiki-content/.env
-  curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe" | python3 -m json.tool
+  curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe" \
+    | node -e "console.log(JSON.stringify(JSON.parse(require('fs').readFileSync(0,'utf8')),null,2))"
   ```
   Ожидаем `"ok": true` и username твоего бота.
 
 ---
 
-## Phase 4 — Bridge: зависимости + запуск + `/health`
+## Phase 4 — Bridge: зависимости + сборка + запуск + `/health`
 
-> Тонкий FastAPI-мост (~150 LOC): webhook → движок → ответ в Telegram. Спавнит **один короткоживущий** `claude -p`-процесс на сообщение ([ADR-0007](../docs/adr/0007-engine-spawn-and-scheduler.md), [ADR-0008](../docs/adr/0008-engine-claude-native.md)), не держит резидентный демон. Owner-only allow-list ([ADR-0009](../docs/adr/0009-tos-safe-engine-access.md)).
+> Тонкий **Fastify**-мост (~150 LOC, TypeScript — [ADR-0012](../docs/adr/0012-language-typescript-port.md)): webhook → движок → ответ в Telegram. Спавнит **один короткоживущий** `claude -p`-процесс на сообщение через `node:child_process` ([ADR-0007](../docs/adr/0007-engine-spawn-and-scheduler.md), [ADR-0008](../docs/adr/0008-engine-claude-native.md)), не держит резидентный демон. Owner-only allow-list ([ADR-0009](../docs/adr/0009-tos-safe-engine-access.md)).
 
-- [ ] **4.1 Поставить зависимости моста.** Из каталога `bridge/`:
+- [ ] **4.1 Поставить зависимости и собрать фреймворк.** Из **корня** публичного репо:
   ```bash
-  cd ~/llm-wiki/bridge
-  python3 -m venv .venv
-  source .venv/bin/activate
-  pip install -e .          # ставит зависимости из pyproject.toml (fastapi, uvicorn, httpx, structlog)
+  cd ~/llm-wiki
+  pnpm install              # ставит зависимости (Fastify/pino/zod/luxon/rrule/dotenv-flow + dev)
+  pnpm build                # tsc → dist/ (то, что реально запускает мост и launchd)
   ```
-  RU: venv держит зависимости локально; в фазе 6 launchd-плист будет звать именно этот интерпретатор (`bridge/.venv/bin/python`). Сам `claude` ставится глобально (фаза 1) и должен быть в `PATH` того окружения, под которым стартует launchd.
+  RU: `pnpm` ставит зависимости в `node_modules` локально; `pnpm build` компилирует `src/*.ts` → `dist/*.js`. В фазе 6 launchd-плист зовёт уже собранный `node dist/bridge/main.js`. Сам `claude` ставится глобально (фаза 1) и должен быть в `PATH` того окружения, под которым стартует launchd.
 
-- [ ] **4.2 Указать мосту путь к `.env`.** Мост читает секреты и `ENGINE` из `~/llm-wiki-content/.env`. Экспортируй путь (или впиши его в `bridge/.env`, как описано в `bridge/README.md`):
+- [ ] **4.2 Заполнить `.env` моста.** Мост (`dist/bridge/main.js`) грузит `.env` из **корня PUBLIC-репо** через `dotenv-flow` (cwd = корень репо). Файл уже создан в фазе 2.5 (`~/llm-wiki/.env`, gitignored) — убедись, что в нём заполнены `TELEGRAM_*`, `ENGINE=claude`, `WIKI_REPO_PATH` (фазы 3.2–3.6):
   ```bash
-  export SECONDBRAIN_ENV=~/llm-wiki-content/.env
+  cd ~/llm-wiki && node -e "require('dotenv-flow').config({silent:true}); console.log('ENGINE=',process.env.ENGINE,'OWNER=',!!process.env.TELEGRAM_OWNER_CHAT_ID)"
   ```
-  RU: `WIKI_REPO_PATH` (рабочий каталог для `claude -p`) и `ENGINE=claude` уже лежат в `.env` из фазы 3.6 — отдельно экспортировать не нужно.
+  RU: отдельно экспортировать переменные не нужно — `dotenv-flow` подхватит `.env` из cwd при старте моста.
 
 - [ ] **4.3 Запустить мост вручную** (foreground, для проверки):
   ```bash
-  cd ~/llm-wiki/bridge
-  source .venv/bin/activate
-  uvicorn app:app --host 127.0.0.1 --port 8080
+  cd ~/llm-wiki
+  pnpm start                # = node dist/bridge/main.js (порт из BRIDGE_PORT)
+  # для разработки с авто-перезапуском: pnpm dev  (= tsx watch src/bridge/main.ts)
   ```
   RU: порт `8080` берётся из `BRIDGE_PORT` в `.env`; согласуй с тем, что прописано в `bridge/README.md` и в config Cloudflare (фаза 5).
 
@@ -292,7 +298,7 @@ sources:
   ```bash
   curl -s http://127.0.0.1:8080/health
   ```
-  Ожидаем `200 OK` (напр. `{"status":"ok"}`). Если падает — смотри structlog-вывод в терминале моста.
+  Ожидаем `200 OK` (напр. `{"status":"ok"}`). Если падает — смотри pino-вывод в терминале моста (`LOG_JSON=0` даёт человекочитаемый pino-pretty).
 
   > ⚠️ Мост — асинхронный: `claude -p` гоняется неблокирующе с timeout (`ENGINE_TIMEOUT_SEC`, ~120–240с), чтобы Telegram-webhook не отвалился. Пока вебхук не настроен (фаза 5), мост просто живёт и отвечает на `/health`.
 
@@ -347,13 +353,14 @@ sources:
     -d "secret_token=${TELEGRAM_WEBHOOK_SECRET}" \
     -d "max_connections=1" \
     --data-urlencode 'allowed_updates=["message"]' \
-    | python3 -m json.tool
+    | node -e "console.log(JSON.stringify(JSON.parse(require('fs').readFileSync(0,'utf8')),null,2))"
   ```
-  RU: путь `/telegram/webhook` — согласуй с тем, что слушает `bridge/app.py`. `secret_token` Telegram будет слать в заголовке `X-Telegram-Bot-Api-Secret-Token`, мост его проверяет. `max_connections=1` — для личного бота достаточно.
+  RU: путь `/telegram/webhook` — согласуй с тем, что слушает `src/bridge/app.ts`. `secret_token` Telegram будет слать в заголовке `X-Telegram-Bot-Api-Secret-Token`, мост его проверяет. `max_connections=1` — для личного бота достаточно.
 
 - [ ] **5.7 Проверить регистрацию webhook:**
   ```bash
-  curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getWebhookInfo" | python3 -m json.tool
+  curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getWebhookInfo" \
+    | node -e "console.log(JSON.stringify(JSON.parse(require('fs').readFileSync(0,'utf8')),null,2))"
   ```
   Ожидаем `"url"` = твой туннель и `"pending_update_count": 0` (или малое число), без `last_error_message`.
 
@@ -365,7 +372,7 @@ sources:
 
 > Три слоя исполнения ([CONTEXT §4](../CONTEXT.md)): **РЕАКТИВ** (Telegram→мост→движок, фазы 3–5), **ПЛАНОВОЕ** (routine→`claude -p`→compile/дайджест/lint/web-research/resurfacing идей), **СОБЫТИЙНОЕ** (новый файл в `raw/`→compile). Локально плановое держит **launchd** (LaunchAgent), не cron: при пробуждении из сна запускает пропущенную задачу и коалесцирует пропуски — идеально для идемпотентного «sweep» ([ADR-0007](../docs/adr/0007-engine-spawn-and-scheduler.md), [proactive-scheduling](../docs/research/proactive-scheduling.md)).
 
-- [ ] **6.1 Заполнить плейсхолдеры в плистах.** Шаблоны лежат в `bridge/` и `scheduler/` (`ru.secondbrain.bridge.plist`, `ru.secondbrain.digest.plist`) с метками `__PLACEHOLDER__` — подставь абсолютные пути (свой `$HOME`, путь к venv-интерпретатору, путь к `.env` и к репо). Затем скопируй в `~/Library/LaunchAgents/`:
+- [ ] **6.1 Заполнить плейсхолдеры в плистах.** Шаблоны лежат в `bridge/` и `scheduler/` (`ru.secondbrain.bridge.plist`, `ru.secondbrain.digest.plist`) с метками вида `__NODE_BIN__` / `__REPO_DIR__` / `__PUBLIC_REPO__` — подставь абсолютные пути (свой `$HOME`, путь к `node`, корень публичного репо с `dist/`). Bridge-плист запускает `node dist/bridge/main.js` (cwd = корень репо, откуда грузится `.env`); digest-плист зовёт `scheduler/run_sweep.sh`. Затем скопируй в `~/Library/LaunchAgents/`:
   ```bash
   cp ~/llm-wiki/bridge/ru.secondbrain.bridge.plist ~/Library/LaunchAgents/
   cp ~/llm-wiki/scheduler/ru.secondbrain.digest.plist ~/Library/LaunchAgents/
@@ -388,7 +395,7 @@ sources:
   ```
   RU: если меняешь плист после загрузки — сначала `launchctl bootout gui/$(id -u) <plist>`, потом снова `bootstrap`.
 
-- [ ] **6.3 (Если мост уже крутился руками из фазы 4)** — останови ручной `uvicorn` и `cloudflared`, чтобы не было двойного слушателя на порту. Теперь их поднимает launchd (`ru.secondbrain.bridge` стартует мост; туннель оформи отдельным агентом или оставь `cloudflared tunnel run` под launchd по `cloudflared service install` — см. `bridge/README.md`).
+- [ ] **6.3 (Если мост уже крутился руками из фазы 4)** — останови ручной `pnpm start` (`node dist/bridge/main.js`) и `cloudflared`, чтобы не было двойного слушателя на порту. Теперь их поднимает launchd (`ru.secondbrain.bridge` стартует мост; туннель оформи отдельным агентом или оставь `cloudflared tunnel run` под launchd по `cloudflared service install` — см. `bridge/README.md`).
 
 - [ ] **6.4 (Опционально) Sleep-политика для локального планового.** v1 на ноутбуке ловит только **сон**, не выключение ([ADR-0005](../docs/adr/0005-host-v1-macbook-portable.md)). Усиления:
   ```bash
@@ -461,24 +468,24 @@ sources:
   - **ChatGPT:** Settings → Data Controls → **Export data** → письмо со ссылкой на `conversations.json` (внутри zip).
   - **Claude:** Settings → Privacy / Account → **Export data** → архив с диалогами (JSON).
   - **Grok / X:** экспорт диалогов Grok или X-archive, если пользуешься.
-  RU: точные форматы парсят коннекторы в `ingest/` (llm_chat-коннектор по [ADR-0010](../docs/adr/0010-wiki-content-model.md)); часть источников (`youtube_takeout.py`, `x_archive.py`, `vk.py`, `whatsapp.py`) пока labelled-stub.
+  RU: точные форматы парсит коннектор `src/ingest/llm-chat.ts` (по [ADR-0010](../docs/adr/0010-wiki-content-model.md)); коннекторы YouTube/X/VK/WhatsApp в TS-порт пока **не перенесены** — это запланированные будущие модули ([ADR-0012](../docs/adr/0012-language-typescript-port.md)).
 
 - [ ] **8.2 Экспортировать данные из Telegram Desktop.** В **десктопном** клиенте (не мобильном): **Settings → Advanced → Export Telegram data** (или по конкретному чату: ⋮ → **Export chat history**). Формат — **Machine-readable JSON**. Получишь каталог с `result.json`.
 
-- [ ] **8.3 Сухой прогон sanitizer** (убедиться, что маскер жив — он fail-closed):
+- [ ] **8.3 Сухой прогон sanitizer** (убедиться, что маскер жив — он fail-closed). После `pnpm build` дёрни скомпилированный модуль (синтетический ввод):
   ```bash
-  cd ~/llm-wiki/ingest
-  python3 -c "from sanitizer import scan_secrets; print(scan_secrets('token=ghp_FAKE1234567890 phone +7 999 123-45-67'))"
+  cd ~/llm-wiki
+  node --input-type=module -e "import('./dist/ingest/sanitizer.js').then(m => console.log(m.scanSecrets('token=ghp_FAKE1234567890 phone +7 999 123-45-67')))"
   ```
-  Ожидаем непустой список найденных секретов → значит детекция работает.
+  Ожидаем непустой список найденных секретов → значит детекция работает. (Полный набор векторов — `pnpm test`, vitest: `src/ingest/sanitizer.test.ts`, в т.ч. кириллические boundary-кейсы — [ADR-0012](../docs/adr/0012-language-typescript-port.md).)
   > ⚠️ Если sanitizer падает — ингест **отменяется** (fail-closed): ни одного немаскированного байта не должно попасть в `raw/`/git. Это инвариант ([CONTEXT §3](../CONTEXT.md)).
 
-- [ ] **8.4 Запустить ингест** Telegram-экспорта → sanitized markdown в `raw/`:
+- [ ] **8.4 Запустить ингест** Telegram-экспорта → sanitized markdown в `raw/` (после `pnpm build`):
   ```bash
-  cd ~/llm-wiki/ingest
-  python3 telegram_export.py --input /путь/к/экспорту/result.json --out ~/llm-wiki-content/raw
+  cd ~/llm-wiki
+  node dist/ingest/telegram-export.js /путь/к/экспорту/result.json --raw-dir ~/llm-wiki-content/raw
   ```
-  RU: точные флаги — в `ingest/README.md`. Парсер берёт `text_entities` (не полиморфное `text`), пишет provenance-frontmatter и двигает watermark **после** успешной записи → повторный ингест идемпотентен. Для LLM-чатов используй соответствующий коннектор llm_chat (см. `ingest/README.md`).
+  RU: точные флаги — в `ingest/README.md`. Парсер берёт `text_entities` (не полиморфное `text`), пишет provenance-frontmatter и двигает watermark **после** успешной записи → повторный ингест идемпотентен. Для LLM-чатов используй коннектор `node dist/ingest/llm-chat.js ... --engine <chatgpt|claude|grok>` (см. `ingest/README.md`).
 
 - [ ] **8.5 Проверить результат.**
   ```bash
@@ -489,7 +496,7 @@ sources:
 
 - [ ] **8.6 Скормить движку для построения вики.** В Telegram-чате с ботом (или плановой compile-routine) попроси разобрать свежий `raw/` в страницы `wiki/` — движок дочитает от watermark и инкрементально заполнит `ideas/`/`concepts/`/`growth/`/`people/`/`projects/` ([ADR-0010](../docs/adr/0010-wiki-content-model.md)). Проверь git-diff приватного репо.
 
-  > RU: код/технические сессии **не пишем verbatim** — извлекаем «что предметно сделал» → агрегируется в `capability-profile` ([ADR-0010](../docs/adr/0010-wiki-content-model.md)). graphify по кодовым базам (`ingest/codebase_graphify.py`) идёт **отдельным** треком, **минуя** sanitizer (код — не PII). Дальнейшие источники (YouTube Takeout → X archive → VK → WhatsApp) — те же шаги через коннекторы в `ingest/`.
+  > RU: код/технические сессии **не пишем verbatim** — извлекаем «что предметно сделал» → агрегируется в `capability-profile` ([ADR-0010](../docs/adr/0010-wiki-content-model.md)). graphify по кодовым базам (`codebase`-коннектор — **запланирован**, в TS-порт пока не перенесён, [ADR-0012](../docs/adr/0012-language-typescript-port.md)) пойдёт **отдельным** треком, **минуя** sanitizer (код — не PII). Дальнейшие источники (YouTube Takeout → X archive → VK → WhatsApp) — те же шаги через будущие коннекторы в `src/ingest/`.
 
 ---
 
@@ -521,19 +528,20 @@ sources:
 - **Бот молчит на сообщения.** Проверь `getWebhookInfo` (`last_error_message`, `pending_update_count`). Частые причины: туннель не поднят (`curl https://.../health` извне), мост лежит (`launchctl list`), `secret_token` в `setWebhook` не совпадает с `TELEGRAM_WEBHOOK_SECRET` в `.env` (мост вернёт 403/дропнет), или твой `chat_id` ≠ `TELEGRAM_OWNER_CHAT_ID` (мост дропает по allow-list).
 - **«chat not found» / 403 при проактивном пуше.** Ты не нажал `/start` у бота, либо позже заблокировал его. Бот не может писать первым — открой чат и нажми Start.
 - **Поставил webhook, но раньше поллил `getUpdates`.** Они взаимоисключающи. `deleteWebhook` перед polling, и заново `setWebhook` после.
-- **`setWebhook` отверг secret.** Charset ограничен `A-Z a-z 0-9 _ -`. Используй `secrets.token_urlsafe` (фаза 3.5); `+`,`/`,`=` из base64 не пройдут.
+- **`setWebhook` отверг secret.** Charset ограничен `A-Z a-z 0-9 _ -`. Используй `randomBytes(32).toString('base64url')` (фаза 3.5); `+`,`/`,`=` из обычного base64 не пройдут.
 - **Cloudflare Access блокирует webhook.** Если включил Zero-Trust Access на hostname — интерактивный логин убьёт доставку webhook. Нужен service-token / bypass-правило, скоупленное на путь `/telegram/webhook`.
 
 ### Лимиты / rate limits
 
 - **Бот отвечает «лимит, попробуй позже».** Упёрся в окно подписки Max (5ч / неделя) или в Agent-SDK-кредит. Проверь живой запас: `claude` → `/status`. Мост делает backoff на limit-ошибке, а не долбёжку. Для одного пользователя лимиты необязывающи; болтливый сценарий — повод для дешёвого «anything due?»-предчека перед спавном движка.
-- **Слишком много спавнов от sweep.** 30-мин `StartInterval` = до ~48 `claude -p`/день даже когда ничего не due. Под подпиской приемлемо, но `scheduler` делает дешёвый plain-Python предчек «есть ли due?» **до** спавна движка, экономя лимиты/кредит.
+- **Слишком много спавнов от sweep.** 30-мин `StartInterval` = до ~48 `claude -p`/день даже когда ничего не due. Под подпиской приемлемо, но `scheduler` делает дешёвый детерминированный предчек «есть ли due?» (`reminders.ts`, без движка/сети) **до** спавна движка, экономя лимиты/кредит.
 
 ### Граница двух репо / утечки
 
-- **Подозрение, что личное попало в PUBLIC-репо.** Прогони локальный линт (он импортирует `ingest.sanitizer.scan_secrets` и фейлится на находке):
+- **Подозрение, что личное попало в PUBLIC-репо.** Прогони локальный линт (он импортирует `scanSecrets` из `src/ingest/sanitizer.ts` и фейлится на находке):
   ```bash
-  cd ~/llm-wiki && python3 scheduler/lint_public.py
+  cd ~/llm-wiki && pnpm build && node dist/scheduler/lint-public.js --root .
+  # короче (после сборки): pnpm lint:public
   ```
   RU: первичная гарантия — **граница двух репо** (PUBLIC физически не содержит `raw/`/`wiki/`), sanitizer/линт — бэкстопы. В PUBLIC-репо — **ни одного** реального email/телефона/`chat_id`/токена; любой пример синтетический («Иван Пример», фейковые даты/id). Если секрет уже в git-истории — его мало удалить: надо **ротировать** и переписать историю (она immutable во всех клонах).
 
@@ -554,7 +562,7 @@ sources:
 - [ ] **A.1 Выбрать backend Grok.** Два допустимых пути:
   - **Grok Build CLI** (официальный бинарь): `grok -p "<prompt>" --output-format json` — форма 1:1 с `claude -p`, парсим текст результата + session-id, resume по session-флагу.
   - **OpenClaw → Grok.** OpenClaw **xAI-санкционирован именно для Grok** ([ADR-0009](../docs/adr/0009-tos-safe-engine-access.md)). ⚠️ Это разрешено **только** на Grok-стороне; для Claude OpenClaw **забанен** — там исключительно официальный `claude`.
-- [ ] **A.2 Реализовать адаптер `GrokEngine`** в `bridge/engine.py` по образцу `ClaudeEngine` (тот же контракт `Engine.run() → (answer, session_id, usage)`, spawn-fresh-per-task). Слот уже зарезервирован.
+- [ ] **A.2 Реализовать адаптер `GrokEngine`** в `src/bridge/engine.ts` по образцу `ClaudeEngine` (тот же контракт `engine.run() → { answer, sessionId, usage }`, spawn-fresh-per-task). Слот уже зарезервирован.
 - [ ] **A.3 Включить через `.env`:** `ENGINE=grok` + `GROK_BIN=grok` (или конфиг OpenClaw-бэкенда). Дальше — как двух-мозговый роутер (Claude-doer + Grok-advisor), если решишь A/B-советы; роутер тривиально доращивается ([ADR-0008](../docs/adr/0008-engine-claude-native.md)).
 
 ## Appendix B — (Опционально, отложено) Codex-адаптер
@@ -565,7 +573,7 @@ sources:
 - [ ] **B.2 Войти под подпиской ChatGPT** (НЕ по API-ключу): `codex login` → «Sign in with ChatGPT» на Plus/Pro-аккаунте. Никакого `OPENAI_API_KEY` в окружении.
 - [ ] **B.3 Запереть конфиг** `~/.codex/config.toml`: `forced_login_method="chatgpt"`, `approval_policy="never"`, `sandbox_mode="workspace-write"`, `writable_roots=["<приватный_репо>"]`, `network_access=false` ([ADR-0007](../docs/adr/0007-engine-spawn-and-scheduler.md)).
 - [ ] **B.4 ВЫКЛЮЧИТЬ обучение модели** на твоём контенте **до** первого ингеста: ChatGPT → Settings → Data Controls → off «Improve the model for everyone» (consumer-аккаунт обучается по умолчанию; ~30-дн abuse-retention даже после opt-out — true ZDR только Enterprise).
-- [ ] **B.5 Включить через `.env`:** `ENGINE=codex` + `CODEX_BIN=codex` + `CODEX_MODEL=<модель>`. Адаптер `CodexEngine` в `bridge/engine.py` спавнит `codex exec [resume <sid>] --json ...` (resume только через `codex exec resume`, **никогда** `--ephemeral` на resume-пути — баг #15538).
+- [ ] **B.5 Включить через `.env`:** `ENGINE=codex` + `CODEX_BIN=codex` + `CODEX_MODEL=<модель>`. Адаптер `CodexEngine` в `src/bridge/engine.ts` спавнит `codex exec [resume <sid>] --json ...` (resume только через `codex exec resume`, **никогда** `--ephemeral` на resume-пути — баг #15538).
 
 > RU: при Codex-бэкенде проверка `$0` в фазе 1.5 меняется на `env | grep -i OPENAI_API_KEY` (ожидаем пусто), а проверка живого запаса в 7.6 — на `codex` → `/status`. Всё остальное в runbook'е (репо, Telegram, туннель, launchd, ингест) от движка не зависит.
 

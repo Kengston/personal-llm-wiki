@@ -13,7 +13,7 @@ sources:
 > Спецификация формата файла `reminders/reminders.md` — источника истины для
 > проактивного слоя «Второго мозга». Этот документ — контракт между движком
 > (который пишет/обновляет записи на capture-time) и детерминированным sweep'ом
-> ([`reminders.py`](reminders.py) + [`digest.py`](digest.py), который их читает).
+> ([`reminders.ts`](../src/scheduler/reminders.ts) + [`digest.ts`](../src/scheduler/digest.ts), который их читает).
 > Фиксируется [ADR-0007 §3](../docs/adr/0007-engine-spawn-and-scheduler.md);
 > обоснование — [research/proactive-scheduling.md](../docs/research/proactive-scheduling.md).
 
@@ -110,7 +110,7 @@ created: 2026-05-31T19:00:00+03:00
 
 ### `recurring` — повторяющееся
 Повторяется по `rrule`. После срабатывания движок **продвигает `due_at`** к
-следующему вхождению (детерминированно, через [`reminders.py`](reminders.py)
+следующему вхождению (детерминированно, через [`reminders.ts`](../src/scheduler/reminders.ts)
 `next_occurrence`, не пере-парсингом NL) и ставит `last_fired`. Сам `rrule` не
 меняется. Примеры RRULE из коробки:
 
@@ -128,7 +128,7 @@ add-on без переделки формата ([CONTEXT §6 OQ-3](../CONTEXT.m
 
 ### `spaced` — idea-resurfacing (интервальный возврат к идее)
 Идея всплывает по лесенке **Leitner `[1, 3, 7, 16, 35]` дней**
-([`reminders.py`](reminders.py) `LEITNER_LADDER`). На каждом всплытии движок
+([`reminders.ts`](../src/scheduler/reminders.ts) `LEITNER_LADDER`). На каждом всплытии движок
 продвигает `box` на 1 (потолок — последняя ступень), пересчитывает
 `interval_days` по ступени и ставит `due_at = now + interval_days`. Пользователь
 в Telegram реагирует: «ещё актуальна» (всплывёт снова позже) / «drop» →
@@ -137,7 +137,7 @@ spacing.
 
 ## Как вычисляется «due» (что покажет sweep)
 
-Детерминированно, в [`reminders.py`](reminders.py) `compute_due()`. Элемент
+Детерминированно, в [`reminders.ts`](../src/scheduler/reminders.ts) `computeDue()`. Элемент
 попадает в дайджест **«сегодня»**, если:
 
 1. `status` ∈ {`pending`, `snoozed`} (живой), И
@@ -171,7 +171,7 @@ anniversary: 2015-09-01  # годовщина (напр. знакомства)
 
 Поддерживаемые поля: `birthday`, `anniversary`, `birth_date`, `named_day`.
 Формат значения — `MM-DD` или `YYYY-MM-DD` (год → вычисление «исполняется N
-лет»). Реализация — [`reminders.py`](reminders.py) `birthdays_from_wiki()`.
+лет»). Реализация — [`reminders.ts`](../src/scheduler/reminders.ts) `birthdaysFromWiki()`.
 
 ## Жизненный цикл записи
 
@@ -203,11 +203,11 @@ anniversary: 2015-09-01  # годовщина (напр. знакомства)
   движка workspace-write на приватный репо
   ([ADR-0007](../docs/adr/0007-engine-spawn-and-scheduler.md)). Один писатель —
   чтобы не конфликтовать диффами.
-- **Читает** (детерминированно, без движка) — [`reminders.py`](reminders.py):
+- **Читает** (детерминированно, без движка) — [`reminders.ts`](../src/scheduler/reminders.ts):
   предчек «что due» перед спавном движка, чтобы зря не жечь месячный
   Agent-SDK-кредит Claude
   ([ADR-0009](../docs/adr/0009-tos-safe-engine-access.md)).
 
 ## Связанные
 
-- [README.md](README.md) · [reminders.py](reminders.py) · [digest.py](digest.py) · [../docs/adr/0007-engine-spawn-and-scheduler.md](../docs/adr/0007-engine-spawn-and-scheduler.md) · [../docs/research/proactive-scheduling.md](../docs/research/proactive-scheduling.md) · [../wiki-example/reminders/example.md](../wiki-example/reminders/example.md)
+- [README.md](README.md) · [reminders.ts](../src/scheduler/reminders.ts) · [digest.ts](../src/scheduler/digest.ts) · [../docs/adr/0007-engine-spawn-and-scheduler.md](../docs/adr/0007-engine-spawn-and-scheduler.md) · [../docs/research/proactive-scheduling.md](../docs/research/proactive-scheduling.md) · [../wiki-example/reminders/example.md](../wiki-example/reminders/example.md)
