@@ -223,7 +223,10 @@ describe('handleJob', () => {
 		await handleJob(state, { chatId: 42, text: 'привет' });
 		expect(telegram.actions).toContainEqual({ chatId: 42, action: 'typing' });
 		expect(telegram.sent.at(-1)).toEqual({ chatId: 42, text: 'ответ движка' });
-		expect(engine.calls[0]).toEqual({ prompt: 'привет', sessionId: null });
+		// Движок получает текст, ОБЁРНУТЫЙ в конверт-маршрутизатор (prompt.ts) и прогнанный
+		// через sanitizer — не голую строку (ADR-0015).
+		expect(engine.calls[0]?.sessionId).toBeNull();
+		expect(engine.calls[0]?.prompt).toContain('привет');
 		expect(state.store.getSession(42)).toBe('sess-1'); // персистнули для resume
 	});
 
@@ -247,6 +250,15 @@ describe('handleJob', () => {
 		engine.error = new EngineError('boom', { transient: false });
 		await handleJob(state, { chatId: 42, text: 'hi' });
 		expect(telegram.sent.at(-1)?.text).toContain('Не удалось обработать');
+	});
+
+	it('секрет в сообщении маскируется ДО движка (§2/ADR-0015)', async () => {
+		const { state, engine } = makeState();
+		const token = 'ghp_' + 'A'.repeat(36);
+		await handleJob(state, { chatId: 42, text: `мой токен ${token}` });
+		const sent = engine.calls[0]?.prompt ?? '';
+		expect(sent).not.toContain(token);
+		expect(sent).toContain('[REDACTED:github_token]');
 	});
 });
 

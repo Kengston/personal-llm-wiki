@@ -17,11 +17,14 @@ import { timingSafeEqual } from 'node:crypto';
 import Fastify, { type FastifyInstance } from 'fastify';
 
 import { childLogger } from '../core/logger.js';
+import { failClosedSanitize, SanitizerError } from '../ingest/sanitizer.js';
 import type { Settings } from './config.js';
 import { type Engine, EngineError, type EngineResult } from './engine.js';
+import { buildOwnerPrompt } from './prompt.js';
 import { AsyncQueue, Mutex, QueueFull } from './queue.js';
 import type { SessionStore } from './store.js';
 import type { TelegramClient } from './telegram.js';
+import { commitIfDirty } from './writeback.js';
 
 const log = childLogger('bridge.app');
 
@@ -54,6 +57,7 @@ export class BridgeState {
 		readonly engine: Engine,
 		readonly store: SessionStore,
 		readonly telegram: TelegramClient,
+		readonly wikiRepoPath?: string,
 	) {
 		this.queue = new AsyncQueue<Job>(settings.maxQueue);
 	}
@@ -128,15 +132,36 @@ export async function handleJob(state: BridgeState, job: Job): Promise<void> {
 		return;
 	}
 
+	// §2 + ADR-0015: маскируем входящий текст fail-closed ДО движка (он уходит в облако и
+	// может попасть в файлы вики). Сбой маскера → ход отменяется (лучше потерять ход, чем
+	// слить секрет). Для обычного текста sanitize — тождество (7.1 не ломается).
+	let safeText: string;
+	try {
+		safeText = failClosedSanitize(job.text);
+	} catch (exc) {
+		if (exc instanceof SanitizerError) {
+			log.warn({ chatId: job.chatId, error: String(exc) }, 'sanitizer.blocked');
+			await state.telegram.sendMessage(
+				job.chatId,
+				'Не обработал: не удалось безопасно замаскировать данные. Убери секреты и попробуй снова.',
+			);
+			return;
+		}
+		throw exc;
+	}
+
 	// «печатает…» сразу — маскирует латентность движка.
 	await state.telegram.sendChatAction(job.chatId, 'typing');
+
+	// Конверт-маршрутизатор (query vs capture); движок пишет файлы сам под acceptEdits.
+	const prompt = buildOwnerPrompt(safeText);
 
 	// single-flight на chat_id: возвращаем результат, отправку делаем ВНЕ lock'а.
 	const result = await state.chatLock(job.chatId).run<EngineResult | null>(async () => {
 		const sessionId = state.store.getSession(job.chatId);
 		let res: EngineResult;
 		try {
-			res = await runEngineWithRetry(state.engine, job.text, sessionId);
+			res = await runEngineWithRetry(state.engine, prompt, sessionId);
 		} catch (exc) {
 			if (exc instanceof EngineError) {
 				log.warn({ chatId: job.chatId, error: String(exc) }, 'engine.failed');
@@ -150,6 +175,14 @@ export async function handleJob(state: BridgeState, job: Job): Promise<void> {
 			throw exc;
 		}
 		if (res.sessionId) state.store.upsertSession(job.chatId, res.sessionId);
+
+		// ADR-0015 R1: движок мог дописать вику (capture) → коммитит ДОВЕРЕННЫЙ мост (НЕ
+		// LLM-инструмент), если дерево «грязное». Query-ход дерево не меняет → коммита нет.
+		// Сериализовано chatLock'ом (single-user → глобально). Сбой коммита не рушит ответ.
+		if (state.wikiRepoPath) {
+			await commitIfDirty(state.wikiRepoPath, 'note: capture via telegram');
+		}
+
 		return res;
 	});
 

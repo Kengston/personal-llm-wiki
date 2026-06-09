@@ -2,7 +2,7 @@
 title: CONTEXT — личный «Второй мозг» (personal LLM-wiki)
 type: overview
 status: in-progress
-last_updated: 2026-06-07
+last_updated: 2026-06-09
 ---
 
 # CONTEXT — Второй мозг
@@ -30,6 +30,7 @@ last_updated: 2026-06-07
 - **Фильтр контента — две оси + роутер задач ([ADR-0011](docs/adr/0011-relevance-sensitivity-filter.md), [compiler/relevance-policy.md](compiler/relevance-policy.md)).** Sibling к sanitizer (не внутри: секреты fail-closed/abort, чувствительность fail-to-quarantine). **Ось A — чувствительность** (`src/ingest/classifier.ts`, on-device, ДО облака; v1 — Tier-1 детерминированный, без ML/embedder). **Ось B — релевантность/важность** на compile (промоутить-vs-settle-vs-leave-in-raw). Плюс **роутер «задача vs знание»** (консервативен в сторону знания; на сомнении — дуал-роут, чтобы не терять ростовой сигнал). **Финансы/здоровье/право — ХРАНИМ как знание** (`keep_redact_spans`: sanitizer маскирует карты/IBAN), а НЕ карантиним; карантин — для NSFW/чужих персданных/токсика. Карантин **побеждает** лейн.
 - **`raw/.quarantine/` и `raw/.tasks/` — поддиректории ВНУТРИ иммутабельного `raw/`.** Карантин (целый чувствительный док) и лейн задач (`raw/.tasks/inbox/` + `tasks/log.md`) исключены из промоушна в `wiki/` (compile/query/digest/resurface) **явным пропуском dot-папок** через `shouldSkipRawPath` (рекурсивный обход сам их НЕ пропускает — нужна явная проверка, что какая-либо часть пути начинается с «.»). «drop» = «не промоутить», хард-delete нет (`raw/` иммутабелен). Каждая ненормальная диспозиция → строка в `raw/.filter-log.jsonl` (приватный репо, **только метаданные/хэш, НИКОГДА содержимое**) + человеко-строка в `log.md` (verb `filter`). Ревью карантина и дайджест читают **лог/метаданные, не тела** (изоляция инъекций).
 - **Инкрементально:** агент дописывает; каждый коммит — git-diff; блоки `<!-- keep -->` не трогаем.
+- **Capture-write-path ([ADR-0015](docs/adr/0015-capture-write-path-permission-posture.md)):** движок правит файлы приватного репо под least-privilege-постурой (`acceptEdits`, **без shell/сети**); **коммит per-turn делает мост**, не движок (`compiler/rules.md §11` соблюдён); push — вручную; capture-текст маскируется fail-closed **до** движка (`§2`).
 - **Без embedder/векторной базы** ([ADR-0002](docs/adr/0002-no-embedder-pure-karpathy.md)) — ранжирует сам LLM-клиент; поиск через `index.md` (+ опц. FTS5 позже).
 - **Watermark на источник** двигается после успешной записи → идемпотентность.
 - **Контент-модель ([ADR-0010](docs/adr/0010-wiki-content-model.md)):** концепции/развитие/идеи-first; код-сессии → accomplishment/capability-выжимка, не verbatim.

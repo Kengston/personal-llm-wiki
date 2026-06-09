@@ -54,7 +54,21 @@ cd "$PUBLIC_REPO"
 run_cmd=("$NODE_BIN" "$PUBLIC_REPO/dist/scheduler/digest.js" "$@")
 
 if [ "${CAFFEINATE:-1}" = "1" ] && command -v caffeinate >/dev/null 2>&1; then
-  exec caffeinate -s "${run_cmd[@]}"
+  caffeinate -s "${run_cmd[@]}" && rc=0 || rc=$?
 else
-  exec "${run_cmd[@]}"
+  "${run_cmd[@]}" && rc=0 || rc=$?
 fi
+
+# --- 3. Коммит правок reminders/вики этого sweep'а (ADR-0015 R1, плановый слой) ---
+# Движок (claude -p под acceptEdits) ПИШЕТ файлы (reminders status/last_fired, log.md),
+# но НЕ гитует (§11 «движок не пишет git»; ADR-0007 «без shell у движка»). Коммитит
+# ДОВЕРЕННЫЙ wrapper — симметрично мосту в реактиве. Только при успехе sweep'а и только
+# если дерево «грязное». НЕ пушит (§11 «не пушит» — пуш ручной шаг владельца).
+if [ "${rc:-1}" -eq 0 ] && [ -d "$CONTENT_ROOT/.git" ]; then
+  git -C "$CONTENT_ROOT" add -A || true
+  if ! git -C "$CONTENT_ROOT" diff --cached --quiet; then
+    git -C "$CONTENT_ROOT" commit --no-verify -q -m "audit: proactive sweep digest" || true
+  fi
+fi
+
+exit "${rc:-1}"

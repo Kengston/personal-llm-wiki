@@ -26,6 +26,7 @@ async function main(): Promise<void> {
 		buildEngineFromEnv(),
 		new SessionStore(settings.dbPath),
 		new BotApiTelegramClient(settings.botToken),
+		(process.env.WIKI_REPO_PATH ?? '').trim() || undefined,
 	);
 
 	// /health поднимаем в обоих режимах (диагностика launchd на 127.0.0.1); webhook-роут
