@@ -190,7 +190,7 @@ abstract class SubprocessEngine implements Engine {
 				engine: this.constructor.name,
 				resume: Boolean(sessionId),
 				sessionId,
-				argvHead: argv.slice(0, 3), // не логируем сам prompt (может быть приватным)
+				argvHead: argv.slice(0, 2), // только бинарь+флаг, НЕ сам prompt (приватный)
 			},
 			'engine.spawn',
 		);

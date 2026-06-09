@@ -31,6 +31,10 @@ dist/
 pnpm-debug.log*
 npm-debug.log*
 
+# Runtime logs (bridge/scheduler stdout/stderr — могут содержать chat_id/usage)
+logs/
+*.log
+
 # OS / editor
 .DS_Store
 .idea/
