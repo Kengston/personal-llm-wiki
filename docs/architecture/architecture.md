@@ -16,6 +16,8 @@ sources:
 > Целевая архитектура личной LLM-wiki: компоненты, **три слоя исполнения** (реактив · плановое · событийное), поток одного сообщения, проактивный sweep, путь данных от источника до Telegram и модель угроз. Это **ремап** проверенного плана `pachca-codex-bridge-plan` (Pachca → bridge → агент) на личный сценарий: тот же тонкий мост, но движок — **Claude-native** (официальный бинарь `claude`, [ADR-0008](../adr/0008-engine-claude-native.md)), backend — не корпоративный `abcage-mcp-hub`, а **личная вики + reminders**, и добавлен **проактив**.
 >
 > Инварианты и терминология — в [CONTEXT.md](../../CONTEXT.md). Решения, на которые опирается эта страница, — в [docs/adr/](../adr/) ([0008](../adr/0008-engine-claude-native.md)/[0009](../adr/0009-tos-safe-engine-access.md)/[0004](../adr/0004-telegram-bridge-reactive-proactive.md)/[0007](../adr/0007-engine-spawn-and-scheduler.md); движок-решение [0008](../adr/0008-engine-claude-native.md) **supersedes** [0001](../adr/0001-engine-subscription-codex.md)). Внешнее обоснование деталей — в [docs/research/](../research/README.md).
+>
+> **⚡ Транспорт реактивного слоя по умолчанию — long polling** ([ADR-0014](../adr/0014-telegram-transport-long-polling.md)): мост опрашивает Telegram исходящими `getUpdates` — **без webhook, домена и CF Tunnel**, inbound attack surface = 0 (`/health` только на `127.0.0.1`). Диаграммы, sequence и threat-model ниже, где фигурируют `webhook`/`CF Tunnel`/секрет-токен, описывают **опциональный** webhook-режим (`BRIDGE_MODE=webhook`); в polling входящего HTTP нет вовсе.
 
 ## 1. Картина целиком
 

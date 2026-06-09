@@ -72,7 +72,7 @@ flowchart LR
 
 The engine runs across **three execution layers** ([ADR-0008](docs/adr/0008-engine-claude-native.md)):
 
-- **① Reactive (Telegram → bridge → engine).** A message hits the Telegram Bot API, travels through a Cloudflare Tunnel to a tiny **Fastify** bridge on your Mac. The bridge validates the webhook secret, **hard-drops anything that is not from your own `chat_id`** (single-user, [ADR-0009](docs/adr/0009-tos-safe-engine-access.md)), then spawns one short-lived `claude -p` (resuming the chat's session via `--resume`) which reads/edits the private wiki and answers. A bare message is *captured* into the wiki; a question is answered from it.
+- **① Reactive (Telegram → bridge → engine).** By default the tiny **Fastify** bridge on your Mac **long-polls** the Telegram Bot API for your messages — no tunnel, no public endpoint, zero inbound surface ([ADR-0014](docs/adr/0014-telegram-transport-long-polling.md)); an optional webhook-via-Cloudflare-Tunnel mode is also supported. Either way the bridge **hard-drops anything that is not from your own `chat_id`** (single-user, [ADR-0009](docs/adr/0009-tos-safe-engine-access.md)), then spawns one short-lived `claude -p` (resuming the chat's session via `--resume`) which reads/edits the private wiki and answers. A bare message is *captured* into the wiki; a question is answered from it.
 - **② Scheduled (routine / launchd → `claude -p`).** A schedule wakes the engine for routine work: **compile** the wiki overnight, a morning **digest + reminders** sweep, weekly **lint**, planned **web-research**, and **idea-resurfacing**. Locally this is `launchd`; the 24/7 upgrade is **remote Claude routines**, which run even while the Mac is asleep because they operate on the private GitHub repo. (A Telegram bot cannot DM you first — so you send `/start` once, the bridge remembers your `chat_id`, and pushes flow forever.)
 - **③ Event (new file in `raw/` → compile).** Dropping a freshly-sanitized source into `raw/` triggers an incremental compile so the wiki stays current without waiting for the nightly routine.
 - **Ingest.** Connectors turn your data — **chats from all LLMs** (ChatGPT/Claude/Grok) first, then Telegram export, VK, WhatsApp, YouTube history, X archive — into sanitized Markdown in `raw/`, through a **fail-closed sanitizer** that masks secrets/PII *before* anything is written.
@@ -116,15 +116,15 @@ The wiki is a "second brain" *about the owner*, so its heart is **concepts, pers
 
 ## Quickstart
 
-> v1 runs on **macOS** and is written host-portable for a later Mac Mini / VPS ([ADR-0005](docs/adr/0005-host-v1-macbook-portable.md)). The setup is genuinely interactive (subscription login, Telegram bot creation, tunnel auth) and cannot be fully automated — so it lives as a runbook, not a script.
+> v1 runs on **macOS** and is written host-portable for a later Mac Mini / VPS ([ADR-0005](docs/adr/0005-host-v1-macbook-portable.md)). The setup is genuinely interactive (subscription login, Telegram bot creation) and cannot be fully automated — so it lives as a runbook, not a script.
 
 Follow **[`setup/SETUP.md`](setup/SETUP.md)** end to end. In short:
 
-1. **Install** the toolchain — `brew install gh cloudflared node pnpm` plus the official `claude` CLI (the framework is **Node 24 + TypeScript**, [ADR-0012](docs/adr/0012-language-typescript-port.md)); then `pnpm install && pnpm build` in this repo.
+1. **Install** the toolchain — `brew install gh node pnpm` (plus `cloudflared` only for the optional webhook mode) and the official `claude` CLI (the framework is **Node 24 + TypeScript**, [ADR-0012](docs/adr/0012-language-typescript-port.md)); then `pnpm install && pnpm build` in this repo.
 2. **Authenticate the engine** — log in to **Claude Code** under your Claude Max subscription (the official binary; never expose the OAuth token to a custom client — [ADR-0009](docs/adr/0009-tos-safe-engine-access.md)), and review your data/privacy controls *before* your first ingest.
 3. **Create the bot** — talk to `@BotFather`, get the token, send `/start` once to capture your owner `chat_id`.
-4. **Configure** — copy `bridge/.env.example` to a gitignored `.env` (loaded by `dotenv-flow` from the repo root) and fill the placeholders (bot token, owner chat id, webhook secret, repo paths).
-5. **Run the bridge** — start the Fastify app (`pnpm start` → `node dist/bridge/main.js`) and a `cloudflared` tunnel; point the Telegram webhook at it.
+4. **Configure** — copy `.env.example` to a gitignored `.env` (loaded by `dotenv-flow` from the repo root) and fill the placeholders (bot token, owner chat id, repo paths; webhook secret only for webhook mode).
+5. **Run the bridge** — `pnpm start` (→ `node dist/bridge/main.js`); by default it long-polls Telegram, so no tunnel or webhook setup is needed ([ADR-0014](docs/adr/0014-telegram-transport-long-polling.md)).
 6. **Load the routines** — `launchctl bootstrap` the digest-sweep and lint agents locally (they run `node dist/...`); optionally promote them to remote Claude routines for 24/7 operation on the private repo.
 7. **First ingest** — run an `ingest/` connector (`node dist/ingest/llm-chat.js …` first, then `node dist/ingest/telegram-export.js …` on a Telegram Desktop `result.json`) and watch the engine compile it into your private wiki.
 
@@ -149,7 +149,8 @@ personal-llm-wiki/
 │                             ingest/query/lint workflows, sanitizer rules, writeback
 ├── src/                      TypeScript sources (compiled to dist/ via `pnpm build`)
 │   ├── bridge/               Telegram ⇄ engine Fastify bridge
-│   │                         app.ts (webhook + HMAC + owner-chat allow-list),
+│   │                         poller.ts (long-poll, default) · app.ts (/health,
+│   │                         opt. webhook + owner-chat allow-list),
 │   │                         engine.ts (spawn via node:child_process; ClaudeEngine
 │   │                         default, Grok/Codex deferred slots), store.ts
 │   │                         (node:sqlite chat_sessions), telegram.ts (Bot API),

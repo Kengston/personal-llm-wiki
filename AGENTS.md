@@ -41,7 +41,7 @@ personal-llm-wiki/
 ├── compiler/
 │   └── rules.md          # детальный контракт хранителя вики (контент-модель ADR-0010, code→accomplishment, capture→правки, reminders, sanitizer, writeback)
 ├── src/                  # TypeScript-исходники (компилируются в dist/ через `pnpm build`)
-│   ├── bridge/           # Telegram ↔ движок: app.ts (Fastify webhook + 3 слоя безопасности) · engine.ts (спавн через node:child_process, дефолт ClaudeEngine) · store.ts (node:sqlite chat→session) · telegram.ts (Bot API client) · config.ts · queue.ts · main.ts (entry → dist/bridge/main.js)
+│   ├── bridge/           # Telegram ↔ движок: poller.ts (long-poll, дефолт [ADR-0014]) · app.ts (Fastify /health + опц. webhook, 3 слоя) · engine.ts (спавн через node:child_process, дефолт ClaudeEngine) · store.ts (node:sqlite chat→session) · telegram.ts (Bot API client) · config.ts · queue.ts · main.ts (entry → dist/bridge/main.js)
 │   ├── ingest/           # sanitizer.ts (общий маскер PII/секретов) · classifier.ts (ADR-0011 чувствительность+роутер лейнов) · watermark.ts · llm-chat.ts (экспорты ChatGPT/Claude/Grok) · telegram-export.ts
 │   ├── scheduler/        # reminders.ts (RRULE/Leitner) · digest.ts (sweep) · routines.ts (диспетчер) · lint-public.ts (страж PII в этом репо) · config.ts · runner.ts
 │   └── core/
@@ -49,7 +49,7 @@ personal-llm-wiki/
 ├── bridge/ · ingest/ · scheduler/  # доки модулей (README.md / reminders_spec.md) + launchd-плисты + shell-обёртки (run на `node dist/...`)
 ├── dist/                 # скомпилированный JS (gitignored) — то, что реально запускает launchd/`pnpm start`
 ├── wiki-example/         # СИНТЕТИЧЕСКИЙ пример личной вики (index, log, people/ideas/concepts/growth/projects/journal/reminders) — всё фейк и помечено
-├── setup/SETUP.md        # ручной runbook активации (claude/gh install, login, бот, tunnel, launchd/routines, первый E2E)
+├── setup/SETUP.md        # ручной runbook активации (claude/gh install, login, бот, launchd/routines, первый E2E; tunnel — только опц. webhook-режим)
 └── docs/
     ├── adr/              # пронумерованные ADR (0001 SUPERSEDED Codex; 0008–0010 — Claude-native/ToS/контент-модель; 0011 фильтр; 0012 TS-порт; не переписывать, можно ДОБАВЛЯТЬ 0013+)
     ├── architecture/     # architecture.md (mermaid, data-flow, три слоя исполнения, ремап Pachca→Telegram, threat-model/privacy)
