@@ -7,15 +7,19 @@
   стартует при логине. LaunchAgent (per-user), а НЕ LaunchDaemon — в v1 хост это
   MacBook владельца, без always-on-root-демона ([ADR-0005], [ADR-0007]).
 
+  Транспорт по умолчанию — long polling ([ADR-0014]): мост сам опрашивает Telegram
+  исходящими getUpdates, БЕЗ webhook/домена/туннеля (inbound attack surface = 0);
+  /health слушает только 127.0.0.1. webhook-режим — опционально (BRIDGE_MODE=webhook).
+
   TypeScript-порт ([ADR-0012]): мост — Fastify на Node (dist/bridge/main.js), не
   FastAPI/uvicorn. СНАЧАЛА собери: pnpm install && pnpm build (tsc → dist/).
 
   УСТАНОВКА (детали — в setup/SETUP.md, ставит человек, не код):
     1. Замени плейсхолдеры __...__ на реальные абсолютные пути этой машины.
     2. Скопируй в ~/Library/LaunchAgents/ru.secondbrain.bridge.plist
-    3. launchctl load -w ~/Library/LaunchAgents/ru.secondbrain.bridge.plist
+    3. launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ru.secondbrain.bridge.plist
     4. Проверка: launchctl list | grep ru.secondbrain.bridge
-                 curl http://127.0.0.1:8080/health
+                 curl http://127.0.0.1:8080/health   (порт из BRIDGE_PORT)
 
   ВАЖНО про секреты: НЕ хардкодим токены в plist. Мост читает их из .env в
   WorkingDirectory (dotenv-flow). Этот файл — публичный пример.
@@ -26,9 +30,9 @@
     <key>Label</key>
     <string>ru.secondbrain.bridge</string>
 
-    <!-- Команда запуска: node поднимает Fastify-мост (dist/bridge/main.js).
-         main.ts слушает 127.0.0.1:BRIDGE_PORT (дефолт 8080) — перед Cloudflare
-         Tunnel мост слушает только loopback. Замени __NODE_BIN__ на путь к node
+    <!-- Команда запуска: node поднимает мост (dist/bridge/main.js). В polling-режиме
+         (дефолт) мост опрашивает Telegram сам; main.ts слушает 127.0.0.1:BRIDGE_PORT
+         только под /health (дефолт 8080). Замени __NODE_BIN__ на путь к node
          (напр. /opt/homebrew/bin/node), __REPO_DIR__ — на корень публичного репо. -->
     <key>ProgramArguments</key>
     <array>
