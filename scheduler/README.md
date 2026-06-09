@@ -25,7 +25,7 @@ sources:
 
 ## Что здесь лежит
 
-> Реализация — **TypeScript** (Node 22, strict ESM), порт с Python ([ADR-0012](../docs/adr/0012-language-typescript-port.md)): luxon (tz-aware время) + rrule (recurrence) + pino. Исходники под `src/scheduler/`, запускается собранный `dist/scheduler/*.js` (`pnpm build`).
+> Реализация — **TypeScript** (Node 24, strict ESM), порт с Python ([ADR-0012](../docs/adr/0012-language-typescript-port.md)): luxon (tz-aware время) + rrule (recurrence) + pino. Исходники под `src/scheduler/`, запускается собранный `dist/scheduler/*.js` (`pnpm build`).
 
 | Файл | Назначение |
 |---|---|

@@ -6,6 +6,15 @@ Verbs: `decision` · `note` · `ingest` · `query` · `lint` · `fired`.
 
 ---
 
+## [2026-06-09] decision | lang | Порт фреймворка Python→TypeScript (ADR-0012, ADR-0013)
+
+Behavior-preserving порт публичного фреймворка (bridge/ingest/scheduler/lint) на **TypeScript** (Node 24, strict ESM), зеркалит house-style `abcage-mcp-hub`. Python удалён (остаётся в git-истории). Язык **не несущий** — все ADR-инварианты держит поведение + тесты, не язык/число зависимостей.
+- **Стек** ([ADR-0012](docs/adr/0012-language-typescript-port.md)) — Fastify + pino + zod + dotenv-flow + `node:sqlite` (встроенный, отсюда Node ≥24) + luxon + rrule + vitest, пакетный менеджер `pnpm`. Исходники в `src/`, сборка в `dist/` (`pnpm build`).
+- **Фикс pii_density** ([ADR-0013](docs/adr/0013-pii-density-valid-phones.md)) — считаются только валидные телефоны (10–15 цифр); дат-насыщенные страницы больше не уходят в ложный `others_pii`-карантин (правка унаследованного из Python flaw, осознанная дивергенция).
+- **Харднинг из 45-агентного аудита** — устойчивый CLI main-guard (`realpathSync` — чинит молчаливый no-op `lint-public` под симлинком/пробелом в пути), int-усечение порогов, naive-timestamp в UTC, атомарные ledger-append'ы, диагностика смерти процесса по сигналу, `'*'`-content-type парсер (security-проверки в хендлере, 404 вместо 415).
+- **Проверки** — 183 теста зелёные (vitest), `typecheck`/`lint`/`build` чисто, gate `lint-public` exit 0; dist-смоук под реальным `node dist` (поймал CJS-interop `rrule`, который vitest маскировал). Запушено в публичный репо (`main`), обновлены description + topics на GitHub.
+- Обновлены живые доки: [AGENTS.md](AGENTS.md), [CONTEXT.md](CONTEXT.md), [README.md](README.md), [index.md](index.md), [docs/architecture/architecture.md](docs/architecture/architecture.md), компонентные README, [setup/SETUP.md](setup/SETUP.md); ADR 0001–0011 заморожены как исторические. ADR-индекс — [docs/adr/README.md](docs/adr/README.md).
+
 ## [2026-05-31] decision | engine | Codex→Claude-native pivot (ADR-0008/0009/0010); routines layer; LLM-chat ingest
 
 Гриллинг-итерации зафиксировали разворот движка: v1 — **Claude-native** вместо Codex. Принято:

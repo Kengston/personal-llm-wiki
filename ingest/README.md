@@ -16,7 +16,7 @@ sources:
 
 ## Что внутри
 
-> Реализация — **TypeScript** (Node 22, strict ESM), порт с Python ([ADR-0012](../docs/adr/0012-language-typescript-port.md)). Исходники под `src/ingest/`, запускается собранный `dist/ingest/*.js` (`pnpm build`). Текст-ядро — на встроенных `RegExp` / `String.normalize('NFKC')` / `node:crypto` (идиоматичный выбор инструмента; инвариант несёт **поведение** + тесты, не число зависимостей — [ADR-0012](../docs/adr/0012-language-typescript-port.md)).
+> Реализация — **TypeScript** (Node 24, strict ESM), порт с Python ([ADR-0012](../docs/adr/0012-language-typescript-port.md)). Исходники под `src/ingest/`, запускается собранный `dist/ingest/*.js` (`pnpm build`). Текст-ядро — на встроенных `RegExp` / `String.normalize('NFKC')` / `node:crypto` (идиоматичный выбор инструмента; инвариант несёт **поведение** + тесты, не число зависимостей — [ADR-0012](../docs/adr/0012-language-typescript-port.md)).
 
 | Файл | Роль |
 |---|---|

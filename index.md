@@ -40,7 +40,7 @@ last_updated: 2026-05-31
 
 ## Код фреймворка
 
-> Фреймворк — **TypeScript** (Node 22, strict ESM), порт с Python ([ADR-0012](docs/adr/0012-language-typescript-port.md)). Исходники под `src/`, собираются в `dist/` через `pnpm build`.
+> Фреймворк — **TypeScript** (Node 24, strict ESM), порт с Python ([ADR-0012](docs/adr/0012-language-typescript-port.md)). Исходники под `src/`, собираются в `dist/` через `pnpm build`.
 
 - [bridge/](bridge/) — тонкий Telegram↔движок мост (Fastify, owner-only allow-list). Абстракция `Engine` с дефолтом `ClaudeEngine`: [src/bridge/engine.ts](src/bridge/engine.ts), [src/bridge/app.ts](src/bridge/app.ts), [src/bridge/telegram.ts](src/bridge/telegram.ts), [src/bridge/store.ts](src/bridge/store.ts) (SQLite `chat→session`), [bridge/README.md](bridge/README.md), LaunchAgent-plist [bridge/ru.secondbrain.bridge.plist](bridge/ru.secondbrain.bridge.plist).
 - [ingest/](ingest/) — коннекторы источников + sanitizer (fail-closed) + watermark: [src/ingest/sanitizer.ts](src/ingest/sanitizer.ts), [src/ingest/classifier.ts](src/ingest/classifier.ts), [src/ingest/watermark.ts](src/ingest/watermark.ts), [src/ingest/llm-chat.ts](src/ingest/llm-chat.ts), [src/ingest/telegram-export.ts](src/ingest/telegram-export.ts), [ingest/README.md](ingest/README.md). Плюс отложенные коннекторы источников (VK/WhatsApp/YouTube/X) — **планируются** ([ADR-0012](docs/adr/0012-language-typescript-port.md)).

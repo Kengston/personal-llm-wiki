@@ -2,7 +2,7 @@
 title: Архитектура — «Второй мозг»
 type: overview
 status: accepted
-last_updated: 2026-05-31
+last_updated: 2026-06-09
 sources:
   - ../../CONTEXT.md
   - ../research/README.md
@@ -26,7 +26,7 @@ sources:
    чаты со ВСЕМИ LLM · Telegram · VK · WhatsApp · YouTube history · X archive · кодовые базы
         │
         ▼
-② ИНГЕСТ И НОРМАЛИЗАЦИЯ  (ingest/, по watermark)
+② ИНГЕСТ И НОРМАЛИЗАЦИЯ  (src/ingest/, по watermark)
    парсеры экспортов → sanitizer (fail-closed) → markdown + provenance
         │
         ▼
@@ -40,7 +40,7 @@ sources:
         ▲                  ▲                │
    реактив (--resume)  событийное       плановое (stateless sweep)
    ┌────┴─────────┐    ┌──┴──────────┐  ┌─────┴──────────┐
-   BRIDGE (FastAPI)    EVENT          SCHEDULER (routine / launchd)
+   BRIDGE (Fastify)    EVENT          SCHEDULER (routine / launchd)
    webhook → ответ     new raw/ → compile   compile · digest · lint · research · resurfacing
         │                  │               │
         ▼                  ▼               ▼
@@ -58,7 +58,7 @@ sources:
 - **Движок — Claude-native, официальный бинарь** ([ADR-0008](../adr/0008-engine-claude-native.md)). `claude -p "<prompt>" --output-format json` (парсим JSON → текст ответа + session id; продолжение через `--resume <id>` / `--continue`). Claude закрывает три роли: интерактивный мозг (реактив), «руки» (web/computer через MCP), компилятор вики (плановое).
 - **ToS-safe by construction** ([ADR-0009](../adr/0009-tos-safe-engine-access.md)). Зовём **только** официальный бинарь, **никогда** не реюзаем OAuth-токен в своём/стороннем HTTP-клиенте (это и есть забаненный паттерн OpenClaw). Bridge — **single-user**: жёсткий allow-list на `chat_id` владельца, всё остальное дропается.
 - **Spawn-fresh-per-task.** Все три слоя спавнят ОДИН короткоживущий `claude -p` на задачу — никогда резидентный демон (обходит класс багов «живая сессия умирает на истечении токена»).
-- **Движок за абстракцией** `run_engine(prompt, session_id|None) -> (answer, new_session_id, usage)` — шов портируемости ([ADR-0008](../adr/0008-engine-claude-native.md)): база `Engine`, дефолт **`ClaudeEngine`**; **`GrokEngine`** (grok-build-cli `grok -p --output-format json` / OpenClaw — допустим только для Grok, не для Claude) и **`CodexEngine`** (`codex exec`) — отложенные слоты-адаптеры, добавляются конфигом.
+- **Движок за абстракцией** `engine.run(prompt, session_id|null): Promise<{ answer, session_id, usage }>` — шов портируемости ([ADR-0008](../adr/0008-engine-claude-native.md)): база `Engine`, дефолт **`ClaudeEngine`**; **`GrokEngine`** (grok-build-cli `grok -p --output-format json` / OpenClaw — допустим только для Grok, не для Claude) и **`CodexEngine`** (`codex exec`) — отложенные слоты-адаптеры, добавляются конфигом.
 - **Память — markdown + `index.md`, без embedder** ([ADR-0002](../adr/0002-no-embedder-pure-karpathy.md)). Семантическое ранжирование делает сам LLM-клиент, читая вики.
 - **Контент-модель** ([ADR-0010](../adr/0010-wiki-content-model.md)): концепции/развитие/идеи-first; код-сессии → accomplishment/capability-выжимка, не verbatim.
 - **Sanitizer — в write-path, fail-closed** ([ADR-0003](../adr/0003-two-repos-public-private.md)). Маскируем секреты/PII ДО записи в `raw/` и ДО любого попадания в публичный репо.
@@ -81,7 +81,7 @@ flowchart LR
 
   subgraph MAC["MacBook владельца (host-portable, ADR-0005)"]
     direction TB
-    B["Bridge<br/>FastAPI ~150 LOC :8080"]
+    B["Bridge<br/>Fastify · src/bridge :8080"]
     DB[("SQLite<br/>chat_sessions")]
     ENG{{"Engine seam<br/>дефолт ClaudeEngine"}}
     C["claude -p<br/>--output-format json<br/>(--resume / --continue)"]
@@ -89,8 +89,8 @@ flowchart LR
     CFG["конфиг движка<br/>owner-only, без generic fetch/shell"]
     LA["routine / launchd<br/>compile · digest · lint · research · resurfacing"]
     EV["watcher: новый файл в raw/<br/>(событийный trigger)"]
-    ING["ingest/<br/>парсеры + sanitizer"]
-    LINT["scheduler/lint_public.py<br/>PII/secret gate"]
+    ING["src/ingest/<br/>парсеры + sanitizer"]
+    LINT["src/scheduler/lint-public.ts<br/>PII/secret gate"]
   end
 
   subgraph PRIV["llm-wiki-content (приватный репо)"]
@@ -152,7 +152,7 @@ sequenceDiagram
   participant T as CF Tunnel
   participant B as Bridge (mac)
   participant D as SQLite
-  participant E as run_engine()
+  participant E as engine.run()
   participant C as claude -p
   participant W as wiki (raw/+wiki/)
   participant O as Anthropic (подписка)
@@ -160,12 +160,12 @@ sequenceDiagram
   U->>TG: "Когда у Ивана день рождения?" (или заметка)
   TG->>T: POST /tg/<secret> (webhook)
   T->>B: forward
-  B->>B: 1) hmac.compare_digest(secret_token)
+  B->>B: 1) crypto.timingSafeEqual(secret_token)
   B->>B: 2) drop if chat_id != OWNER_CHAT_ID (single-user)
   B->>TG: sendChatAction "typing" + короткий ack
   B->>D: SELECT session_id WHERE chat_id=?
   D-->>B: session_id (или null для первого сообщения)
-  B->>E: run_engine(prompt, session_id)
+  B->>E: engine.run(prompt, session_id)
   E->>C: claude -p "<prompt>" --output-format json [--resume <sid>] (рабочая дир = wiki)
   C->>O: auth официальным бинарём (подписка, НЕ API-ключ; токен НЕ реюзаем в своём клиенте)
   Note over C,W: Claude решает: прочитать index.md → нужную страницу
@@ -176,7 +176,7 @@ sequenceDiagram
   end
   O-->>C: финальный ответ
   C-->>E: JSON: { result: "<текст>", session_id, usage }
-  E-->>B: (answer, new_session_id, usage)
+  E-->>B: { answer, session_id, usage }
   B->>D: UPSERT chat_id → new_session_id
   B->>TG: sendMessage(answer)
   TG-->>U: ответ в чате
@@ -205,8 +205,8 @@ sequenceDiagram
   autonumber
   participant LA as routine / launchd
   participant SW as run_sweep (shell/skill)
-  participant PY as предчек (python)
-  participant E as run_engine()
+  participant PY as предчек (Node)
+  participant E as engine.run()
   participant C as claude -p (stateless)
   participant W as wiki + reminders
   participant TG as Telegram Bot API
@@ -221,7 +221,7 @@ sequenceDiagram
   alt ничего не due
     PY-->>SW: nothing → выход (экономим лимиты подписки / Agent-SDK-кредит)
   else есть due
-    SW->>E: run_engine(sweep_prompt, session_id=None)
+    SW->>E: engine.run(sweep_prompt, null)
     E->>C: claude -p "<sweep_prompt>" --output-format json (рабочая дир = wiki)
     C->>W: прочитать due + контекст из вики, собрать digest
     C-->>E: { result: "<digest>", usage }
@@ -234,7 +234,7 @@ sequenceDiagram
 
 Принципы (см. [proactive-scheduling.md](../research/proactive-scheduling.md)):
 
-- **Дешёвый python-предчек до движка** — если ничего не due, не тратим лимиты подписки / Agent-SDK-кредит на спавн `claude`.
+- **Дешёвый предчек до движка (Node)** — если ничего не due, не тратим лимиты подписки / Agent-SDK-кредит на спавн `claude`.
 - **Дедуп по `status`/`last_fired`** — коалесцированный двойной запуск (launchd или наложившийся remote-прогон) не должен задвоить пуш.
 - **«Бот не пишет первым» снимается через `/start`**: владелец один раз шлёт `/start`, мост пишет `chat.id` как `OWNER_CHAT_ID`, дальше плановый слой шлёт пуши вечно.
 - **«Машина спит»**: локально обходим (catch-up-on-wake + утренний digest; launchd ловит сон, но не power-off). Полностью снимается **remote Claude routines** — они работают над приватным репо независимо от Mac ([ADR-0005](../adr/0005-host-v1-macbook-portable.md)).
@@ -247,9 +247,9 @@ sequenceDiagram
 | `pachca-codex-bridge-plan` (компания) | «Второй мозг» (личное) | Δ |
 |---|---|---|
 | Pachca + Bot API | **Telegram** + Bot API | заменено |
-| `X-Pachca-Signature` (HMAC) | `X-Telegram-Bot-Api-Secret-Token` (`hmac.compare_digest`) | заменено |
+| `X-Pachca-Signature` (HMAC) | `X-Telegram-Bot-Api-Secret-Token` (`crypto.timingSafeEqual`) | заменено |
 | — (бот в общих каналах) | **allow-list на `chat_id` владельца** | net-new (single-owner) |
-| FastAPI bridge + CF Tunnel на Mac Mini | то же (v1 — MacBook, host-portable) | 1:1 |
+| FastAPI bridge + CF Tunnel на Mac Mini | **Fastify** bridge (v1 — MacBook, host-portable) | паттерн 1:1, FastAPI→Fastify |
 | `codex exec --json --resume` под ChatGPT-подпиской | **`claude -p --output-format json` (`--resume`)** под Claude Max, официальный бинарь ([ADR-0008](../adr/0008-engine-claude-native.md)) | заменено (Codex→Claude-native) |
 | движок жёстко = Codex | **engine-portable**: `Engine` + дефолт `ClaudeEngine`; Grok/Codex — отложенные слоты | расширено |
 | SQLite `thread_id → session_id` | SQLite `chat_id → session_id` | 1:1 (переименование ключа) |
@@ -264,13 +264,13 @@ sequenceDiagram
 
 ```mermaid
 flowchart LR
-  S0["чаты со ВСЕМИ LLM<br/>ChatGPT/Claude/Grok export"] --> P["парсеры<br/>(llm_chat, text_entities)"]
+  S0["чаты со ВСЕМИ LLM<br/>ChatGPT/Claude/Grok export"] --> P["парсеры<br/>(llm-chat, text_entities)"]
   S1["Telegram export<br/>result.json"] --> P
   S2["VK / WhatsApp /<br/>YouTube / X<br/>(коннекторы-стабы)"] -.-> P
-  P --> SAN["sanitizer.sanitize_text()<br/>FAIL-CLOSED"]
+  P --> SAN["sanitizer.sanitizeText()<br/>FAIL-CLOSED"]
   SAN -->|"ярус-1: секреты<br/>regex + энтропия → ABORT при детекте"| SAN
   SAN -->|"ярус-2: PII<br/>email/phone/card → маскируем"| RAW[("raw/<br/>markdown + provenance<br/>+ watermark")]
-  RAW --> WM["watermark.py<br/>курсор источника"]
+  RAW --> WM["watermark.ts<br/>курсор источника"]
   RAW -->|"событийный trigger"| AGENT["Claude compile-агент<br/>claude -p (по compiler/rules.md)"]
   AGENT -->|"концепции/идеи/развитие;<br/>код → accomplishment-выжимка"| WIKI[("wiki/<br/>concepts/ideas/growth/people/<br/>projects/capability-profile<br/>+ index.md + log.md")]
   WIKI --> QUERY["реактив: вопрос → ответ"]
@@ -286,14 +286,14 @@ flowchart LR
 
 Этапы (детали — [data-ingestion.md](../research/data-ingestion.md), [privacy-security.md](../research/privacy-security.md), контент-модель — [ADR-0010](../adr/0010-wiki-content-model.md)):
 
-1. **Парсинг экспорта.** Stdlib-парсеры в `ingest/`. **Чаты со всеми LLM — first** (`llm_chat.py`: экспорты ChatGPT/Claude/Grok), затем Telegram (`text_entities`, не полиморфное поле `text`; большой `result.json` стримить, не `json.load` целиком), дальше — коннекторы-стабы (VK/WhatsApp/YouTube/X). Подгрузка инкрементальная по watermark.
-2. **Sanitizer (fail-closed, write-path).** Публичный интерфейс — `sanitize_text(text)->str` и `scan_secrets(text)->list[str]`, владеет всем маскированием. Два яруса: ярус-1 (секреты: regex + энтропия Шеннона, **abort при детекте** — запись отменяется); ярус-2 (PII: email/phone/card/IBAN/IP — **маскируем, но не блокируем**, чтобы лоссовый NER по именам не ронял ingest).
+1. **Парсинг экспорта.** Парсеры в `src/ingest/` (встроенные `RegExp` / `String.normalize`, без тяжёлых зависимостей). **Чаты со всеми LLM — first** (`llm-chat.ts`: экспорты ChatGPT/Claude/Grok), затем Telegram (`text_entities`, не полиморфное поле `text`; большой `result.json` стримить, не читать целиком в память), дальше — коннекторы-стабы (VK/WhatsApp/YouTube/X). Подгрузка инкрементальная по watermark.
+2. **Sanitizer (fail-closed, write-path).** Публичный интерфейс — `sanitizeText(text): string` и `scanSecrets(text): string[]`, владеет всем маскированием. Два яруса: ярус-1 (секреты: regex + энтропия Шеннона, **abort при детекте** — запись отменяется); ярус-2 (PII: email/phone/card/IBAN/IP — **маскируем, но не блокируем**, чтобы лоссовый NER по именам не ронял ingest).
 3. **`raw/` (immutable).** Sanitized markdown с provenance-frontmatter (источник, дата экспорта, watermark). Никогда не редактируется задним числом.
 4. **watermark.** Курсор «дочитано до» на источник; двигается **только после успешной записи** → повторный ингест идемпотентен.
 5. **Compile-агент (Claude-native).** `claude -p` по контракту [`compiler/rules.md`](../../compiler/rules.md) читает дельту `raw/`, обновляет 5–15 страниц `wiki/`, дописывает `log.md`, помечает противоречия. **Контент-модель** ([ADR-0010](../adr/0010-wiki-content-model.md)): концепции/идеи/развитие — first; код-сессии не verbatim, а выжимка «что построил / навык / решения» → агрегируется в `capability-profile`. Блоки `<!-- keep -->` не трогает. Запуск — событийный (новый файл в `raw/`) или плановый (ночная компиляция).
 6. **Ответ/digest.** Реактив (вопрос → ответ) и плановое (due → digest) читают `wiki/` через `index.md` и шлют результат в Telegram.
 
-**graphify — отдельный трек.** Кодовые базы ингестятся локально через tree-sitter в `graph.json` и **минуют sanitizer** (исходный код — не PII). Коннектор — стаб `ingest/codebase_graphify.py`.
+**graphify — отдельный трек.** Кодовые базы ингестятся локально через tree-sitter в `graph.json` и **минуют sanitizer** (исходный код — не PII). Коннектор — отложенный стаб (graphify — отдельный трек/скилл, вне TS-порта).
 
 ## 7. Состояние и хранилища
 
@@ -317,10 +317,10 @@ flowchart LR
 
 | Угроза | Вектор | Митигация |
 |---|---|---|
-| **Утечка личного в публичный репо** | случайный коммит `raw/`/`wiki/` в `personal-llm-wiki` | **граница двух репо** ([ADR-0003](../adr/0003-two-repos-public-private.md)): публичный физически не содержит данных. Бэкстопы: `scheduler/lint_public.py` (`scan_secrets`, exit≠0 на хит) + gitleaks pre-commit **и** CI. |
+| **Утечка личного в публичный репо** | случайный коммит `raw/`/`wiki/` в `personal-llm-wiki` | **граница двух репо** ([ADR-0003](../adr/0003-two-repos-public-private.md)): публичный физически не содержит данных. Бэкстопы: `src/scheduler/lint-public.ts` (`scanSecrets`, exit≠0 на хит) + gitleaks pre-commit **и** CI. |
 | **Секрет/PII в `raw/`** | токен/телефон в исходном сообщении | sanitizer fail-closed на write-path: ярус-1 (секреты) **отменяет запись**; ярус-2 (PII) маскирует. |
 | **Чужой `chat_id` пишет боту** | username бота фактически публичен | allow-list: drop любой update, где `chat_id != OWNER_CHAT_ID`. |
-| **Подделка webhook** | POST на endpoint моста напрямую | `hmac.compare_digest(X-Telegram-Bot-Api-Secret-Token, ...)` (≥32 симв.) + секретный путь webhook; backend закрыт за CF Tunnel. |
+| **Подделка webhook** | POST на endpoint моста напрямую | `crypto.timingSafeEqual(X-Telegram-Bot-Api-Secret-Token, ...)` (≥32 симв.) + секретный путь webhook; backend закрыт за CF Tunnel. |
 | **Prompt-injection из ингеста** | вредоносная инструкция в чужом сообщении → эксфильтрация | least-privilege: движок без generic «fetch URL»/shell; единственный исходящий канал — узкий Telegram-пуш владельцу; рабочая дир ограничена приватным репо. Остаточный риск **принят** ([ADR-0007](../adr/0007-engine-spawn-and-scheduler.md)). |
 | **Бан за нарушение ToS подписки** | реюз OAuth-токена в стороннем/своём HTTP-клиенте (паттерн OpenClaw), мультиюзер (account-sharing) | зовём **только официальный бинарь** `claude -p`; **single-user** allow-list на свой `chat_id`; токен подписки **никогда** не вынимаем в кастомный клиент ([ADR-0009](../adr/0009-tos-safe-engine-access.md)). OpenClaw допустим лишь для отложенного Grok-адаптера, не для Claude. |
 | **Движок обучается на данных** | политики провайдера подписки (data/retention) меняются | свериться с актуальными data-controls Anthropic на шаге setup; crown-jewel-секреты в прозу вики не писать (sanitizer + контент-модель — выжимки, не verbatim). |
@@ -338,7 +338,7 @@ flowchart TB
   subgraph BOUNDARY["Граница (контроль)"]
     SAN2["sanitizer (fail-closed)"]
     GATE["bridge: secret_token + allow-list chat_id"]
-    LINT2["lint_public + gitleaks (CI)"]
+    LINT2["lint-public + gitleaks (CI)"]
   end
   subgraph TRUSTED["Доверяем (приватный периметр)"]
     PRIV2["llm-wiki-content<br/>raw/ + wiki/ + reminders/"]
