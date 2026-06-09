@@ -18,6 +18,15 @@ export interface TelegramClient {
 	sendMessage(chatId: number, text: string, disableNotification?: boolean): Promise<void>;
 	sendChatAction(chatId: number, action?: string): Promise<void>;
 	getMe(): Promise<Record<string, unknown>>;
+	/** Long-poll за апдейтами (polling-режим, [ADR-0014]); массив update-объектов. */
+	getUpdates(
+		offset: number,
+		timeoutSec: number,
+		allowedUpdates?: string[],
+		signal?: AbortSignal,
+	): Promise<Array<Record<string, unknown>>>;
+	/** Снять webhook — обязательно перед polling (иначе getUpdates → 409). */
+	deleteWebhook(dropPendingUpdates?: boolean): Promise<void>;
 	aclose(): Promise<void>;
 }
 
@@ -61,17 +70,49 @@ export class BotApiTelegramClient implements TelegramClient {
 		return this.call('getMe', {});
 	}
 
+	/**
+	 * Long-poll getUpdates ([ADR-0014], polling-режим). Свой увеличенный таймаут
+	 * (timeoutSec + запас), т.к. общий TELEGRAM_TIMEOUT_MS короче long-poll и оборвал
+	 * бы запрос раньше ответа. Внешний signal обрывает висящий poll на shutdown.
+	 */
+	async getUpdates(
+		offset: number,
+		timeoutSec: number,
+		allowedUpdates: string[] = ['message'],
+		signal?: AbortSignal,
+	): Promise<Array<Record<string, unknown>>> {
+		const result: unknown = await this.call(
+			'getUpdates',
+			{ offset, timeout: timeoutSec, allowed_updates: allowedUpdates },
+			{ timeoutMs: timeoutSec * 1000 + 15_000, signal },
+		);
+		return Array.isArray(result) ? (result as Array<Record<string, unknown>>) : [];
+	}
+
+	/** Снять webhook — обязательно перед polling (webhook и getUpdates взаимоисключающи, иначе 409). */
+	async deleteWebhook(dropPendingUpdates = false): Promise<void> {
+		await this.call('deleteWebhook', { drop_pending_updates: dropPendingUpdates });
+	}
+
 	async aclose(): Promise<void> {
 		// fetch использует глобальный пул keep-alive — явного close не требуется.
 	}
 
 	/** Низкоуровневый POST к Bot API. Бросает на HTTP-ошибке или ok=false. */
-	private async call(method: string, payload: Record<string, unknown>): Promise<Record<string, unknown>> {
+	private async call(
+		method: string,
+		payload: Record<string, unknown>,
+		opts: { timeoutMs?: number; signal?: AbortSignal } = {},
+	): Promise<Record<string, unknown>> {
+		// Свой таймаут на вызов (long-poll просит больше TELEGRAM_TIMEOUT_MS) + внешний
+		// AbortSignal (быстрый shutdown обрывает висящий long-poll).
+		const timeoutSignal = AbortSignal.timeout(opts.timeoutMs ?? TELEGRAM_TIMEOUT_MS);
+		const signal = opts.signal ? AbortSignal.any([timeoutSignal, opts.signal]) : timeoutSignal;
 		const resp = await fetch(`${this.methodBase}/${method}`, {
 			method: 'POST',
 			headers: { 'content-type': 'application/json' },
 			body: JSON.stringify(payload),
-			signal: AbortSignal.timeout(TELEGRAM_TIMEOUT_MS),
+			signal,
 		});
 		if (!resp.ok) {
 			throw new Error(`Telegram ${method} вернул HTTP ${resp.status}`);

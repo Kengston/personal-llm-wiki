@@ -4,7 +4,7 @@
  * Интеграция: spawn-fresh через shebang-скрипты (без реального `claude`) —
  * проверяет runProcess (успех / ненулевой код / timeout / ENOENT).
  */
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -18,17 +18,9 @@ import {
 } from './engine.js';
 
 describe('ClaudeEngine.buildArgv', () => {
-	it('первый ход: claude -p prompt --output-format json --cwd repo', () => {
+	it('первый ход: claude -p prompt --output-format json (cwd через spawn, не флаг)', () => {
 		const eng = new ClaudeEngine({ claudeBin: 'claude', wikiRepoPath: '/repo' });
-		expect(eng.buildArgv('привет', null)).toEqual([
-			'claude',
-			'-p',
-			'привет',
-			'--output-format',
-			'json',
-			'--cwd',
-			'/repo',
-		]);
+		expect(eng.buildArgv('привет', null)).toEqual(['claude', '-p', 'привет', '--output-format', 'json']);
 	});
 
 	it('resume: добавляет --resume <id> и -m <model>', () => {
@@ -39,8 +31,6 @@ describe('ClaudeEngine.buildArgv', () => {
 			'hi',
 			'--output-format',
 			'json',
-			'--cwd',
-			'/r',
 			'-m',
 			'opus',
 			'--resume',
@@ -206,6 +196,15 @@ describe('SubprocessEngine.run (реальный spawn через ClaudeEngine)'
 		expect(res.answer).toBe('привет из движка');
 		expect(res.sessionId).toBe('sess-xyz');
 		expect(res.usage).toEqual({ output_tokens: 5 });
+	});
+
+	it('claude запускается в cwd = wikiRepoPath (а не флагом --cwd)', async () => {
+		const bin = script(
+			`console.log(JSON.stringify({type:'result',result:process.cwd(),session_id:'s'}))`,
+		);
+		const eng = new ClaudeEngine({ claudeBin: bin, wikiRepoPath: dir, timeoutSeconds: 10 });
+		const res = await eng.run('тест');
+		expect(res.answer).toBe(realpathSync(dir)); // ответ = cwd дочернего процесса
 	});
 
 	it('ненулевой код выхода → EngineError', async () => {

@@ -39,7 +39,7 @@ sources:
 | 2 | `gh` + два репозитория (public/private) + push | mac + GitHub | ~25 мин | 4 |
 | 3 | Telegram-бот: @BotFather → token + `chat_id` → `.env` (`ENGINE=claude`) | Telegram | ~20 мин | 4, 5, 6, 7 |
 | 4 | Bridge: зависимости + запуск + `/health` | mac | ~20 мин | 5 |
-| 5 | Cloudflare Tunnel + `setWebhook` с secret | mac + CF | ~20 мин | 7 (реактив) |
+| 5 | _(опц., только `BRIDGE_MODE=webhook`)_ Cloudflare Tunnel + `setWebhook` | mac + CF | ~20 мин | — |
 | 6 | launchd: автозапуск bridge + плановые routines (+ опц. remote Claude routine) | mac | ~20 мин | 7 (плановое) |
 | 7 | End-to-end тесты (реактив + capture + плановое) | тестируем | ~30 мин | — |
 | 8 | Первый ингест: экспорт LLM-чатов (ChatGPT/Claude/Grok) + Telegram → `raw/` | mac | ~40 мин | — |
@@ -307,6 +307,9 @@ sources:
 ## Phase 5 — Cloudflare Tunnel + `setWebhook` с secret
 
 > Публичный HTTPS-эндпоинт для входящего webhook без проброса портов и публичного IP. cloudflared делает только **исходящие** соединения — нет inbound-attack-surface ([privacy-security](../docs/research/privacy-security.md)).
+
+> ### ⚡ С [ADR-0014](../docs/adr/0014-telegram-transport-long-polling.md): дефолтный транспорт — **long polling**, и эта фаза **НЕОБЯЗАТЕЛЬНА**
+> При `BRIDGE_MODE=polling` (дефолт) мост сам опрашивает Telegram исходящими `getUpdates` — **ни домена, ни `cloudflared`, ни `setWebhook` не нужно**, а inbound attack surface = 0. Просто запусти мост (Phase 4) и переходи к Phase 6–7 (E2E работает и для polling). Шаги 5.1–5.7 ниже нужны **только** если ты осознанно выбрал `BRIDGE_MODE=webhook` (push-режим, требует домена под Cloudflare + `TELEGRAM_WEBHOOK_SECRET`).
 
 - [ ] **5.1 Установить cloudflared.**
   ```bash

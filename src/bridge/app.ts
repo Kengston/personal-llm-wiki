@@ -203,13 +203,22 @@ export async function stopBridge(state: BridgeState): Promise<void> {
 // Fastify-приложение                                                          //
 // --------------------------------------------------------------------------- //
 
-/** Построить Fastify-инстанс с роутами /health и /telegram/webhook/:nonce. */
-export function buildApp(state: BridgeState): FastifyInstance {
+/**
+ * Построить Fastify-инстанс. /health — всегда (диагностика launchd в обоих режимах,
+ * [ADR-0014]); webhook-роут /telegram/webhook/:nonce — только при `webhook` (в
+ * polling входящего HTTP нет). Дефолт webhook:true сохраняет webhook-режим и тесты.
+ */
+export function buildApp(state: BridgeState, opts: { webhook?: boolean } = {}): FastifyInstance {
+	const includeWebhook = opts.webhook ?? true;
 	const app = Fastify({ logger: false, trustProxy: true });
 
 	// Лояльный JSON-парсер: кривое тело → undefined (вебхук ответит 200 без ретраев),
 	// а не 400, как делает Python (молча игнорируем плохой JSON).
-	const parseJsonBody = (_req: unknown, body: string, done: (err: Error | null, value?: unknown) => void): void => {
+	const parseJsonBody = (
+		_req: unknown,
+		body: string,
+		done: (err: Error | null, value?: unknown) => void,
+	): void => {
 		const raw = typeof body === 'string' ? body.trim() : '';
 		if (!raw) {
 			done(null, undefined);
@@ -247,6 +256,9 @@ export function buildApp(state: BridgeState): FastifyInstance {
 		};
 	});
 
+	// polling-режим ([ADR-0014]): входящего вебхука нет — отдаём только /health.
+	if (!includeWebhook) return app;
+
 	app.post<{ Params: { nonce: string } }>('/telegram/webhook/:nonce', async (request, reply) => {
 		const { nonce } = request.params;
 		const secret = state.settings.webhookSecret;
@@ -283,7 +295,10 @@ export function buildApp(state: BridgeState): FastifyInstance {
 			if (exc instanceof QueueFull) {
 				log.error({ chatId: job.chatId }, 'webhook.queue_full');
 				try {
-					await state.telegram.sendMessage(job.chatId, 'Я сейчас перегружен, попробуй через минуту.');
+					await state.telegram.sendMessage(
+						job.chatId,
+						'Я сейчас перегружен, попробуй через минуту.',
+					);
 				} catch {
 					// best-effort
 				}

@@ -6,14 +6,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 
 import type { Settings } from './config.js';
-import {
-	BridgeState,
-	buildApp,
-	extractJob,
-	handleJob,
-	startWorkers,
-	stopBridge,
-} from './app.js';
+import { BridgeState, buildApp, extractJob, handleJob, startWorkers, stopBridge } from './app.js';
 import { type Engine, EngineError, type EngineResult } from './engine.js';
 import { SessionStore } from './store.js';
 import type { TelegramClient } from './telegram.js';
@@ -22,7 +15,12 @@ const SECRET = 'super-secret-nonce-AaBbCc';
 
 class FakeEngine implements Engine {
 	calls: { prompt: string; sessionId: string | null }[] = [];
-	result: EngineResult = { answer: 'ответ движка', sessionId: 'sess-1', usage: null, isError: false };
+	result: EngineResult = {
+		answer: 'ответ движка',
+		sessionId: 'sess-1',
+		usage: null,
+		isError: false,
+	};
 	error: Error | null = null;
 
 	async run(prompt: string, sessionId: string | null = null): Promise<EngineResult> {
@@ -50,6 +48,10 @@ class FakeTelegram implements TelegramClient {
 		if (this.getMeError) throw this.getMeError;
 		return this.me;
 	}
+	async getUpdates(): Promise<Array<Record<string, unknown>>> {
+		return [];
+	}
+	async deleteWebhook(): Promise<void> {}
 	async aclose(): Promise<void> {}
 	waitForMessage(): Promise<void> {
 		return new Promise((r) => this.waiters.push(r));
@@ -66,7 +68,9 @@ function makeState(overrides: Partial<Settings> = {}): {
 	const settings: Settings = {
 		botToken: 'token',
 		ownerChatId: 42,
+		mode: 'webhook',
 		webhookSecret: SECRET,
+		pollTimeoutSec: 50,
 		dbPath: ':memory:',
 		maxQueue: 2,
 		workers: 1,

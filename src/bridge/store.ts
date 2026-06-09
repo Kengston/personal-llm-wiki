@@ -39,6 +39,10 @@ CREATE TABLE IF NOT EXISTS chat_sessions (
     engine_session_id TEXT    NOT NULL,
     updated_at        INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS bridge_meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 `;
 
 interface SessionRow {
@@ -79,6 +83,27 @@ export class SessionStore {
 	/** Забыть сессию чата (команда /reset, recovery при протухшем resume). */
 	resetSession(chatId: number): void {
 		this.db.prepare('DELETE FROM chat_sessions WHERE chat_id = ?').run(chatId);
+	}
+
+	/**
+	 * Telegram getUpdates offset (polling-режим, [ADR-0014]). Переживает рестарт
+	 * launchd → подтверждённые апдейты не переотдаются, меньше повторов хода движка.
+	 */
+	getOffset(): number {
+		const row = this.db.prepare("SELECT value FROM bridge_meta WHERE key = 'tg_offset'").get() as
+			| { value: string }
+			| undefined;
+		return row ? Number(row.value) || 0 : 0;
+	}
+
+	/** Сохранить offset после обработки батча апдейтов. */
+	setOffset(offset: number): void {
+		this.db
+			.prepare(
+				`INSERT INTO bridge_meta (key, value) VALUES ('tg_offset', ?)
+				 ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+			)
+			.run(String(offset));
 	}
 
 	/** Закрыть коннект (на shutdown моста). */

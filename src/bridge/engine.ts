@@ -83,10 +83,10 @@ interface ProcResult {
 function runProcess(
 	bin: string,
 	args: string[],
-	opts: { timeoutMs: number; env: NodeJS.ProcessEnv },
+	opts: { timeoutMs: number; env: NodeJS.ProcessEnv; cwd?: string },
 ): Promise<ProcResult> {
 	return new Promise<ProcResult>((resolve, reject) => {
-		const child = spawn(bin, args, { env: opts.env, stdio: ['ignore', 'pipe', 'pipe'] });
+		const child = spawn(bin, args, { cwd: opts.cwd, env: opts.env, stdio: ['ignore', 'pipe', 'pipe'] });
 		const stdoutChunks: Buffer[] = [];
 		const stderrChunks: Buffer[] = [];
 		let settled = false;
@@ -172,6 +172,11 @@ abstract class SubprocessEngine implements Engine {
 		return { ...process.env };
 	}
 
+	/** Рабочая директория дочернего процесса (cwd спавна; адаптеры переопределяют). */
+	protected workingDir(): string | undefined {
+		return undefined;
+	}
+
 	protected missingBinaryHint(): string {
 		return 'Бинарь движка не найден. Проверь установку и переменную *_BIN (см. setup/SETUP.md).';
 	}
@@ -195,6 +200,7 @@ abstract class SubprocessEngine implements Engine {
 			result = await runProcess(bin, args, {
 				timeoutMs: this.timeoutSeconds * 1000,
 				env: this.childEnv(),
+				cwd: this.workingDir(),
 			});
 		} catch (exc) {
 			if (exc instanceof ProcessTimeoutError) {
@@ -279,10 +285,17 @@ export class ClaudeEngine extends SubprocessEngine {
 		this.extraArgs = opts.extraArgs ?? [];
 	}
 
+	/** claude читает/пишет вики из cwd — задаём рабочую директорию спавна, не флагом. */
+	protected override workingDir(): string | undefined {
+		return this.wikiRepoPath;
+	}
+
 	buildArgv(prompt: string, sessionId: string | null): string[] {
-		// claude -p "<prompt>" --output-format json --cwd <wiki_repo> [-m model]
+		// claude -p "<prompt>" --output-format json [-m model]
 		//        [--resume <session_id> | --continue] [extraArgs...]
-		const argv = [this.claudeBin, '-p', prompt, '--output-format', 'json', '--cwd', this.wikiRepoPath];
+		// Рабочая директория (вики-репо) задаётся через cwd спавна (workingDir()), а НЕ
+		// флагом: у официального claude нет --cwd (фикс при E2E polling, [ADR-0014]).
+		const argv = [this.claudeBin, '-p', prompt, '--output-format', 'json'];
 		if (this.model) argv.push('-m', this.model);
 		if (sessionId) {
 			if (this.continueLatest) argv.push('--continue');
