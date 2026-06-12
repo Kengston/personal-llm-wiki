@@ -168,7 +168,7 @@ sources:
     --source ~/llm-wiki --remote origin --push \
     --description "Personal LLM-wiki second brain (Karpathy pattern): Claude-native engine + Telegram bridge, no embedder."
   ```
-  > ⚠️ **Перед** этим убедись, что в `~/llm-wiki` нет личных данных (это и есть инвариант двух репо). Быстрый локальный линт PII/секретов — фаза 8 / `pnpm lint:public` (`src/scheduler/lint-public.ts`). Если ещё нет коммита: `git -C ~/llm-wiki init && git -C ~/llm-wiki add -A && git -C ~/llm-wiki commit -m "init framework"` перед `gh repo create`.
+  > ⚠️ **Перед** этим убедись, что в `~/llm-wiki` нет личных данных (это и есть инвариант двух репо). Быстрый локальный линт PII/секретов — фаза 8 / `pnpm lint:public` (`src/scheduler/lint-public.ts`). Если ещё нет коммита: `git -C ~/llm-wiki init && git -C ~/llm-wiki add -A && git -C ~/llm-wiki commit -m "init framework"` перед `gh repo create`. Поставь и **pre-commit-хук** (staged-only lint-public), чтобы дальнейшие коммиты проверялись автоматически — канонический скрипт и установка в [scheduler/README.md](../scheduler/README.md) (§ «`lint-public.ts` в pre-commit / CI»).
 
 - [ ] **2.4 Подготовить PRIVATE-каталог** (личный контент). Если каталога ещё нет — создай скелет по целевому layout:
   ```bash
