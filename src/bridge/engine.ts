@@ -266,6 +266,8 @@ export interface ClaudeEngineOptions {
 	timeoutSeconds?: number;
 	continueLatest?: boolean;
 	extraArgs?: string[];
+	/** Персона реактивного моста → --append-system-prompt (ADR-0016). Sweep не задаёт. */
+	systemPrompt?: string;
 }
 
 export class ClaudeEngine extends SubprocessEngine {
@@ -274,6 +276,7 @@ export class ClaudeEngine extends SubprocessEngine {
 	private readonly model: string | null;
 	private readonly continueLatest: boolean;
 	private readonly extraArgs: string[];
+	private readonly systemPrompt: string | null;
 
 	constructor(opts: ClaudeEngineOptions = {}) {
 		super();
@@ -283,6 +286,7 @@ export class ClaudeEngine extends SubprocessEngine {
 		this.timeoutSeconds = opts.timeoutSeconds ?? 180;
 		this.continueLatest = opts.continueLatest ?? false;
 		this.extraArgs = opts.extraArgs ?? [];
+		this.systemPrompt = opts.systemPrompt ?? null;
 	}
 
 	/** claude читает/пишет вики из cwd — задаём рабочую директорию спавна, не флагом. */
@@ -296,6 +300,9 @@ export class ClaudeEngine extends SubprocessEngine {
 		// Рабочая директория (вики-репо) задаётся через cwd спавна (workingDir()), а НЕ
 		// флагом: у официального claude нет --cwd (фикс при E2E polling, [ADR-0014]).
 		const argv = [this.claudeBin, '-p', prompt, '--output-format', 'json'];
+		// Персона реактивного моста — системный промпт (ADR-0016); сообщение владельца
+		// остаётся чистым user-аргументом. Sweep строит движок без systemPrompt.
+		if (this.systemPrompt) argv.push('--append-system-prompt', this.systemPrompt);
 		if (this.model) argv.push('-m', this.model);
 		if (sessionId) {
 			if (this.continueLatest) argv.push('--continue');
@@ -529,8 +536,15 @@ export class GrokEngine extends SubprocessEngine {
  * Собрать движок из окружения (ENGINE=claude|grok|codex, дефолт claude).
  * Сменить/добавить движок — добавить ветку здесь; остальной мост не меняется.
  */
-export function buildEngineFromEnv(env: NodeJS.ProcessEnv = process.env): Engine {
-	const wikiRepo = (env.WIKI_REPO_PATH ?? '').trim();
+export function buildEngineFromEnv(
+	env: NodeJS.ProcessEnv = process.env,
+	opts: { systemPrompt?: string; repoPath?: string } = {},
+): Engine {
+	// cwd движка: по умолчанию приватный контент-репо (WIKI_REPO_PATH). Полоса продолжения
+	// сессий ([ADR-0017]) передаёт repoPath = cwd конкретного проекта И НЕ задаёт systemPrompt
+	// (персона — только wiki-полоса, [ADR-0016]) — так приватная вика и код-сессия не
+	// сосуществуют в одном процессе (lethal trifecta, [ADR-0007]).
+	const wikiRepo = (opts.repoPath ?? (env.WIKI_REPO_PATH ?? '').trim()).trim();
 	if (!wikiRepo) {
 		throw new EngineError(
 			'WIKI_REPO_PATH не задан — движку некуда указывать (приватный контент-репо). ' +
@@ -549,6 +563,7 @@ export function buildEngineFromEnv(env: NodeJS.ProcessEnv = process.env): Engine
 			model: (env.CLAUDE_MODEL || '').trim() || null,
 			timeoutSeconds: timeout,
 			continueLatest: env.CLAUDE_CONTINUE_LATEST === '1',
+			systemPrompt: opts.systemPrompt,
 		});
 	}
 

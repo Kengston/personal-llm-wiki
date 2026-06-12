@@ -303,6 +303,19 @@ export async function runSweep(cfg: SchedulerConfig, opts: SweepOptions = {}): P
 		return 0;
 	}
 
+	// 1c. Тротл «только-скоро»: ничего строго-due и нет карантина → анонс upcoming
+	// шлём максимум раз в локальные сутки. Иначе каждый 5-мин sweep заново тащит то же
+	// «скоро» и спамит (у upcoming-элементов нет своего last_fired-дедупа). Строго-due
+	// и фильтр-события идут всегда (свой дедуп) — этот гейт их не касается.
+	const onlyUpcoming = items.length > 0 && strictlyDue.length === 0 && !filterSection;
+	if (onlyUpcoming && cfg.quietWhenOnlyUpcoming) {
+		const lastUpcoming = readFilterWatermark(cfg.upcomingWatermark);
+		if (lastUpcoming && lastUpcoming.toLocal().hasSame(now.toLocal(), 'day')) {
+			log.info('only-upcoming-already-digested-today, skipping engine spawn');
+			return 0;
+		}
+	}
+
 	const prompt = buildSweepPrompt(cfg, items, now, filterSection);
 
 	if (dryRun) {
@@ -347,7 +360,7 @@ export async function runSweep(cfg: SchedulerConfig, opts: SweepOptions = {}): P
 	assertNoSecrets(digestText);
 
 	// 4. Push владельцу (тихо, если только «скоро» и нет карантина).
-	const disableNotification = cfg.quietWhenOnlyUpcoming && !strictlyDue.length && !filterSection;
+	const disableNotification = cfg.quietWhenOnlyUpcoming && onlyUpcoming;
 	try {
 		await pushToOwner(digestText, { disableNotification });
 	} catch (exc) {
@@ -358,6 +371,8 @@ export async function runSweep(cfg: SchedulerConfig, opts: SweepOptions = {}): P
 
 	// Дайджест ушёл → ТЕПЕРЬ двигаем filter-watermark (батчинг/rate-limit P0-2).
 	if (filterSection) writeFilterWatermark(cfg.filterWatermark, now);
+	// «Только-скоро» ушло → отметить сутки, чтобы 5-мин sweeps не повторяли его.
+	if (onlyUpcoming) writeFilterWatermark(cfg.upcomingWatermark, now);
 	return 0;
 }
 

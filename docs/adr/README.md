@@ -2,7 +2,7 @@
 title: Индекс ADR — архитектурные решения «Второго мозга»
 type: index
 status: in-progress
-last_updated: 2026-06-09
+last_updated: 2026-06-10
 ---
 
 # Индекс ADR — «Второй мозг»
@@ -35,13 +35,15 @@ last_updated: 2026-06-09
 | [0013](0013-pii-density-valid-phones.md) | Фикс pii_density: считаем только валидные телефоны (10–15 цифр) — даты ISO больше не триггерят others_pii-карантин (осознанное расхождение с Python). | accepted |
 | [0014](0014-telegram-transport-long-polling.md) | Транспорт Telegram — **long polling** по умолчанию (исходящий `getUpdates`, ноль inbound, $0, без домена/туннеля); webhook сохранён опцией. Уточняет [0004](0004-telegram-bridge-reactive-proactive.md). | accepted |
 | [0015](0015-capture-write-path-permission-posture.md) | Capture-write-path: движок пишет файлы (`acceptEdits`, **без shell**), коммит per-turn делает **мост**; capture-текст маскируется до движка. Уточняет [0007](0007-engine-spawn-and-scheduler.md), ничего не superseded. | accepted |
+| [0016](0016-bot-persona-configurable-system-prompt.md) | Персона бота — настраиваемый системный промпт реактивного моста (`--append-system-prompt`, регистр-aware); контент **личный** (приватный `persona.md`), фреймворк = generic-дефолт + `persona.example.md`. | accepted |
+| [0017](0017-telegram-session-read-and-continue.md) | Telegram читает/продолжает локальные сессии Claude Code (`~/.claude/projects/`): отдельная полоса (cwd = проект, без персоны/вики), local-first (в сеть — только контекст хода), чтение без облака, `SESSIONS_ALLOWLIST` deny-by-default. Уточняет [0007](0007-engine-spawn-and-scheduler.md)/[0015](0015-capture-write-path-permission-posture.md), ничего не superseded. | accepted |
 
 ## Сквозные темы
 
 - **Движок.** [0001](0001-engine-subscription-codex.md) (superseded) → [0008](0008-engine-claude-native.md) (Claude-native, engine-portable) + [0009](0009-tos-safe-engine-access.md) (ToS-safe доступ) + спавн-паттерн в [0007](0007-engine-spawn-and-scheduler.md) + permission-постура capture-write-path (`acceptEdits`, коммитит мост) в [0015](0015-capture-write-path-permission-posture.md).
 - **Память и контент.** [0002](0002-no-embedder-pure-karpathy.md) (без вектора) + [0010](0010-wiki-content-model.md) (типы страниц, правило сжатия кода).
 - **Репозитории и хостинг.** [0003](0003-two-repos-public-private.md) (public/private split) + [0006](0006-github-account-kengston.md) (аккаунт) + [0005](0005-host-v1-macbook-portable.md) (host) + remote-routine-апгрейд в [0007](0007-engine-spawn-and-scheduler.md).
-- **Интерфейс и проактив.** [0004](0004-telegram-bridge-reactive-proactive.md) (Telegram-bridge) + транспорт по умолчанию — long polling [0014](0014-telegram-transport-long-polling.md) (webhook → опция) + формат reminders/sweep в [0007](0007-engine-spawn-and-scheduler.md).
+- **Интерфейс и проактив.** [0004](0004-telegram-bridge-reactive-proactive.md) (Telegram-bridge) + транспорт по умолчанию — long polling [0014](0014-telegram-transport-long-polling.md) (webhook → опция) + формат reminders/sweep в [0007](0007-engine-spawn-and-scheduler.md) + чтение/продолжение локальных сессий Claude Code из Telegram (отдельная полоса, local-first) в [0017](0017-telegram-session-read-and-continue.md).
 - **Фильтрация и приватность.** [0011](0011-relevance-sensitivity-filter.md) (чувствительность on-device до облака + релевантность на compile + лейн задач) опирается на границу двух репо [0003](0003-two-repos-public-private.md) (приватные лексиконы/карантин — только в приватном репо) и no-embedder/no-cloud-vector [0002](0002-no-embedder-pure-karpathy.md) (Tier-1 детерминированный, без ML; Tier-2 ML — отложен).
 
 ## Связанные

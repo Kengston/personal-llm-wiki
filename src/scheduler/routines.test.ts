@@ -24,6 +24,7 @@ function makeCfg(dir: string, over: Partial<SchedulerConfig> = {}): SchedulerCon
 		tasksLog: join(dir, 'tasks', 'log.md'),
 		tasksInbox: join(dir, 'raw', '.tasks', 'inbox'),
 		filterWatermark: join(dir, 'raw', '.watermarks', 'filter-digest.txt'),
+		upcomingWatermark: join(dir, 'raw', '.watermarks', 'upcoming-digest.txt'),
 		filterSamplesPerCategory: 2,
 		lookaheadDays: 7,
 		graceMinutes: 5,

@@ -20,8 +20,16 @@ import { childLogger } from '../core/logger.js';
 import { failClosedSanitize, SanitizerError } from '../ingest/sanitizer.js';
 import type { Settings } from './config.js';
 import { type Engine, EngineError, type EngineResult } from './engine.js';
-import { buildOwnerPrompt } from './prompt.js';
 import { AsyncQueue, Mutex, QueueFull } from './queue.js';
+import {
+	findSession,
+	formatAmbiguous,
+	formatSessionCard,
+	formatSessionList,
+	listSessions,
+	readSessionTail,
+	type SessionsConfig,
+} from './sessions.js';
 import type { SessionStore } from './store.js';
 import type { TelegramClient } from './telegram.js';
 import { commitIfDirty } from './writeback.js';
@@ -58,6 +66,11 @@ export class BridgeState {
 		readonly store: SessionStore,
 		readonly telegram: TelegramClient,
 		readonly wikiRepoPath?: string,
+		// Полоса локальных сессий Claude Code ([ADR-0017]). Опциональны: фича включается
+		// только при SESSIONS_ENABLED=1 + непустом allowlist. resumeEngineFor строит движок
+		// под cwd конкретного проекта (без персоны вики) для `/resume`.
+		readonly sessions?: SessionsConfig,
+		readonly resumeEngineFor?: (projectPath: string) => Engine,
 	) {
 		this.queue = new AsyncQueue<Job>(settings.maxQueue);
 	}
@@ -132,6 +145,14 @@ export async function handleJob(state: BridgeState, job: Job): Promise<void> {
 		return;
 	}
 
+	// Команды локальных сессий Claude Code ([ADR-0017]): /sessions, /session, /resume.
+	// Доступны ТОЛЬКО при сконфигурированной фиче (SESSIONS_ENABLED=1 + непустой allowlist).
+	// Своя обработка (свой маскер на отдачу/инъекцию) — поэтому ДО общего sanitize вики-хода.
+	if (state.sessions?.enabled && isSessionCommand(job.text)) {
+		await handleSessionCommand(state, job);
+		return;
+	}
+
 	// §2 + ADR-0015: маскируем входящий текст fail-closed ДО движка (он уходит в облако и
 	// может попасть в файлы вики). Сбой маскера → ход отменяется (лучше потерять ход, чем
 	// слить секрет). Для обычного текста sanitize — тождество (7.1 не ломается).
@@ -153,15 +174,14 @@ export async function handleJob(state: BridgeState, job: Job): Promise<void> {
 	// «печатает…» сразу — маскирует латентность движка.
 	await state.telegram.sendChatAction(job.chatId, 'typing');
 
-	// Конверт-маршрутизатор (query vs capture); движок пишет файлы сам под acceptEdits.
-	const prompt = buildOwnerPrompt(safeText);
-
 	// single-flight на chat_id: возвращаем результат, отправку делаем ВНЕ lock'а.
+	// Сообщение владельца идёт движку ЧИСТЫМ user-турном; персона/роутинг — в системном
+	// промпте моста (ADR-0016), а не в тексте.
 	const result = await state.chatLock(job.chatId).run<EngineResult | null>(async () => {
 		const sessionId = state.store.getSession(job.chatId);
 		let res: EngineResult;
 		try {
-			res = await runEngineWithRetry(state.engine, prompt, sessionId);
+			res = await runEngineWithRetry(state.engine, safeText, sessionId);
 		} catch (exc) {
 			if (exc instanceof EngineError) {
 				log.warn({ chatId: job.chatId, error: String(exc) }, 'engine.failed');
@@ -193,6 +213,136 @@ export async function handleJob(state: BridgeState, job: Job): Promise<void> {
 	log.info(
 		{ chatId: job.chatId, usage: result.usage, answerChars: result.answer.length },
 		'job.done',
+	);
+}
+
+// --------------------------------------------------------------------------- //
+// Команды локальных сессий Claude Code ([ADR-0017])                           //
+// --------------------------------------------------------------------------- //
+
+const SESSION_COMMANDS = new Set(['/sessions', '/session', '/resume']);
+
+/** Первый токен сообщения (имя команды). */
+function firstToken(text: string): string {
+	return text.trim().split(/\s+/, 1)[0] ?? '';
+}
+
+/** Это одна из команд работы с сессиями? (роутинг в handleJob). */
+export function isSessionCommand(text: string): boolean {
+	return SESSION_COMMANDS.has(firstToken(text));
+}
+
+/**
+ * Обработать /sessions | /session <id> | /resume <id> <сообщение>. Чтение —
+ * локальное, без облака (маскируется sanitizeText на отдачу). Продолжение —
+ * локальный движок в cwd проекта; инъекция маскируется failClosedSanitize до облака.
+ */
+async function handleSessionCommand(state: BridgeState, job: Job): Promise<void> {
+	const cfg = state.sessions;
+	if (!cfg) return;
+	const text = job.text.trim();
+	const cmd = firstToken(text);
+
+	// /sessions [подстрока] — список (фильтр по firstPrompt/projectPath).
+	if (cmd === '/sessions') {
+		const query = text.slice(cmd.length).trim().toLowerCase();
+		const all = listSessions(cfg);
+		const filtered = query
+			? all.filter((s) => `${s.firstPrompt} ${s.projectPath}`.toLowerCase().includes(query))
+			: all;
+		const shown = filtered.slice(0, cfg.listLimit);
+		await state.telegram.sendMessage(
+			job.chatId,
+			formatSessionList(shown, filtered.length, cfg.listLimit),
+		);
+		return;
+	}
+
+	// /session <id> — карточка + хвост диалога (локальное чтение, без движка).
+	if (cmd === '/session') {
+		const id = firstToken(text.slice(cmd.length));
+		if (!id) {
+			await state.telegram.sendMessage(job.chatId, 'Использование: /session <id>. Список: /sessions');
+			return;
+		}
+		const { meta, ambiguous } = findSession(cfg, id);
+		if (!meta) {
+			await state.telegram.sendMessage(job.chatId, formatAmbiguous(id, ambiguous));
+			return;
+		}
+		const tail = readSessionTail(meta, cfg.tailMessages);
+		await state.telegram.sendMessage(job.chatId, formatSessionCard(meta, tail));
+		return;
+	}
+
+	// /resume <id> <сообщение> — продолжить сессию локальным движком в cwd проекта.
+	const m = text.match(/^\/resume\s+(\S+)\s+([\s\S]+)$/);
+	if (!m) {
+		await state.telegram.sendMessage(
+			job.chatId,
+			'Использование: /resume <id> <сообщение>. Список: /sessions',
+		);
+		return;
+	}
+	const id = m[1] ?? '';
+	const message = (m[2] ?? '').trim();
+	const { meta, ambiguous } = findSession(cfg, id);
+	if (!meta) {
+		await state.telegram.sendMessage(job.chatId, formatAmbiguous(id, ambiguous));
+		return;
+	}
+	if (!state.resumeEngineFor) {
+		await state.telegram.sendMessage(
+			job.chatId,
+			'Продолжение сессий не сконфигурировано (нет resume-движка).',
+		);
+		return;
+	}
+
+	// Инъекцию маскируем fail-closed ДО облачного движка ([ADR-0015] §2): сбой → отмена хода.
+	let safeMsg: string;
+	try {
+		safeMsg = failClosedSanitize(message);
+	} catch (exc) {
+		if (exc instanceof SanitizerError) {
+			log.warn({ chatId: job.chatId, error: String(exc) }, 'resume.sanitizer_blocked');
+			await state.telegram.sendMessage(
+				job.chatId,
+				'Не отправил: не смог безопасно замаскировать сообщение. Убери секреты и попробуй снова.',
+			);
+			return;
+		}
+		throw exc;
+	}
+
+	await state.telegram.sendChatAction(job.chatId, 'typing');
+	// Сериализуем с реактивной полосой по chat_id (single-user → глобально): не плодим
+	// параллельные claude-процессы. Движок строится под cwd проекта сессии (без персоны вики).
+	const result = await state.chatLock(job.chatId).run<EngineResult | null>(async () => {
+		const engine = state.resumeEngineFor!(meta.projectPath);
+		try {
+			return await runEngineWithRetry(engine, safeMsg, meta.sessionId);
+		} catch (exc) {
+			if (exc instanceof EngineError) {
+				log.warn(
+					{ chatId: job.chatId, sessionId: meta.sessionId, error: String(exc) },
+					'resume.failed',
+				);
+				await state.telegram.sendMessage(
+					job.chatId,
+					'Не удалось продолжить сессию (движок недоступен или сессия не резюмируется).',
+				);
+				return null;
+			}
+			throw exc;
+		}
+	});
+	if (!result) return;
+
+	await state.telegram.sendMessage(job.chatId, result.answer);
+	log.info(
+		{ chatId: job.chatId, sessionId: meta.sessionId, answerChars: result.answer.length },
+		'resume.done',
 	);
 }
 

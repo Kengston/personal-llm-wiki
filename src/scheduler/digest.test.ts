@@ -5,7 +5,7 @@
  */
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { DateTime, Duration } from 'luxon';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -33,6 +33,7 @@ function makeCfg(dir: string, over: Partial<SchedulerConfig> = {}): SchedulerCon
 		tasksLog: join(dir, 'tasks', 'log.md'),
 		tasksInbox: join(dir, 'raw', '.tasks', 'inbox'),
 		filterWatermark: join(dir, 'raw', '.watermarks', 'filter-digest.txt'),
+		upcomingWatermark: join(dir, 'raw', '.watermarks', 'upcoming-digest.txt'),
 		filterSamplesPerCategory: 2,
 		lookaheadDays: 7,
 		graceMinutes: 5,
@@ -211,6 +212,35 @@ describe('runSweep — exit-коды без реального движка', ()
 			['---', 'id: t', 'due_at: 2026-06-08T10:02:00+03:00', 'status: pending'].join('\n'),
 			'utf8',
 		);
+		const saved = process.env.WIKI_REPO_PATH;
+		delete process.env.WIKI_REPO_PATH;
+		try {
+			expect(await runSweep(cfg, { now: NOW })).toBe(2);
+		} finally {
+			if (saved !== undefined) process.env.WIKI_REPO_PATH = saved;
+		}
+	});
+
+	// Регресс: «только-скоро» (нет строго-due) не должен спамить каждый 5-мин sweep.
+	const UPCOMING = ['---', 'id: u', 'due_at: 2026-06-10T10:00:00+03:00', 'status: pending'].join('\n');
+
+	it('только-скоро + watermark уже сегодня → 0 без спавна движка', async () => {
+		const cfg = makeCfg(dir);
+		writeFileSync(cfg.remindersPath, UPCOMING, 'utf8');
+		mkdirSync(dirname(cfg.upcomingWatermark), { recursive: true });
+		writeFileSync(cfg.upcomingWatermark, NOW.toUTC().toISO() ?? '', 'utf8');
+		const saved = process.env.WIKI_REPO_PATH;
+		delete process.env.WIKI_REPO_PATH; // движок недоступен: если бы спавнился — был бы exit 2
+		try {
+			expect(await runSweep(cfg, { now: NOW })).toBe(0);
+		} finally {
+			if (saved !== undefined) process.env.WIKI_REPO_PATH = saved;
+		}
+	});
+
+	it('только-скоро без watermark (первый за сутки) → доходит до движка (exit 2)', async () => {
+		const cfg = makeCfg(dir);
+		writeFileSync(cfg.remindersPath, UPCOMING, 'utf8');
 		const saved = process.env.WIKI_REPO_PATH;
 		delete process.env.WIKI_REPO_PATH;
 		try {

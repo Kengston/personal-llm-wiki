@@ -20,6 +20,7 @@ export interface SchedulerConfig {
 	tasksLog: string;
 	tasksInbox: string; // raw/.tasks/inbox/ — считаем только КОЛ-ВО файлов
 	filterWatermark: string; // курсор «с какого момента показывать фильтр-сводку»
+	upcomingWatermark: string; // дата последнего «только-скоро» дайджеста (дедуп раз/сутки)
 	filterSamplesPerCategory: number;
 	lookaheadDays: number;
 	graceMinutes: number;
@@ -57,6 +58,7 @@ export function loadSchedulerConfig(env: NodeJS.ProcessEnv = process.env): Sched
 		tasksLog: env.TASKS_LOG ?? join(contentRoot, 'tasks', 'log.md'),
 		tasksInbox: env.TASKS_INBOX ?? join(rawDir, '.tasks', 'inbox'),
 		filterWatermark: env.FILTER_DIGEST_WATERMARK ?? join(rawDir, '.watermarks', 'filter-digest.txt'),
+		upcomingWatermark: env.UPCOMING_DIGEST_WATERMARK ?? join(rawDir, '.watermarks', 'upcoming-digest.txt'),
 		filterSamplesPerCategory: intEnv(env.FILTER_DIGEST_SAMPLES, 2),
 		lookaheadDays,
 		graceMinutes,

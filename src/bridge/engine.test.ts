@@ -52,6 +52,20 @@ describe('ClaudeEngine.buildArgv', () => {
 		expect(argv[2]).toBe(evil); // целиком, не разбит
 		expect(argv.filter((a) => a === evil)).toHaveLength(1);
 	});
+
+	it('systemPrompt → --append-system-prompt отдельным аргументом (ADR-0016)', () => {
+		const eng = new ClaudeEngine({ wikiRepoPath: '/r', systemPrompt: 'PERSONA-X' });
+		const argv = eng.buildArgv('привет', null);
+		const i = argv.indexOf('--append-system-prompt');
+		expect(i).toBeGreaterThan(-1);
+		expect(argv[i + 1]).toBe('PERSONA-X');
+		expect(argv[2]).toBe('привет'); // сообщение владельца остаётся чистым
+	});
+
+	it('без systemPrompt → нет --append-system-prompt', () => {
+		const argv = new ClaudeEngine({ wikiRepoPath: '/r' }).buildArgv('hi', null);
+		expect(argv).not.toContain('--append-system-prompt');
+	});
 });
 
 describe('ClaudeEngine.parseOutput', () => {

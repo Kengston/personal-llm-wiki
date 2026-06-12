@@ -223,10 +223,9 @@ describe('handleJob', () => {
 		await handleJob(state, { chatId: 42, text: 'привет' });
 		expect(telegram.actions).toContainEqual({ chatId: 42, action: 'typing' });
 		expect(telegram.sent.at(-1)).toEqual({ chatId: 42, text: 'ответ движка' });
-		// Движок получает текст, ОБЁРНУТЫЙ в конверт-маршрутизатор (prompt.ts) и прогнанный
-		// через sanitizer — не голую строку (ADR-0015).
-		expect(engine.calls[0]?.sessionId).toBeNull();
-		expect(engine.calls[0]?.prompt).toContain('привет');
+		// Движок получает ЧИСТЫЙ санитизированный текст — персона/роутинг в системном
+		// промпте моста, не в user-турне (ADR-0016); sanitize — тождество для 'привет'.
+		expect(engine.calls[0]).toEqual({ prompt: 'привет', sessionId: null });
 		expect(state.store.getSession(42)).toBe('sess-1'); // персистнули для resume
 	});
 
