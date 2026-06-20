@@ -63,7 +63,7 @@ export function isActive(rem: Reminder): boolean {
 export interface DueItem {
 	id: string;
 	title: string;
-	kind: string; // oneoff | recurring | spaced | birthday | anniversary
+	kind: string; // oneoff | recurring | spaced | birthday | anniversary | target
 	dueAt: DateTime;
 	source: string; // "reminders" | "wiki:<relpath>"
 	detail: string;
@@ -365,6 +365,67 @@ export function birthdaysFromWiki(wikiDir: string, opts: DueOptions = {}): DueIt
 	return items;
 }
 
+// --- Дедлайны growth-страниц (target_date) ------------------------------------
+// [ADR-0021]: growth-роадмапы несут дедлайн цели во frontmatter `target_date`
+// (ISO С ТАЙМЗОНОЙ). Сканируем его в DueItem по образцу birthdaysFromWiki, но это
+// ОДНОРАЗОВАЯ абсолютная дата (не yearly recurrence, как день рождения).
+const TYPE_FIELD = /^type\s*:\s*(.+?)\s*$/im;
+const TARGET_DATE_FIELD = /^target_date\s*:\s*(.+?)\s*$/im;
+
+/**
+ * Просканировать wiki/growth/ на страницы с `target_date:` — одноразовым дедлайном
+ * цели — и вернуть due/upcoming DueItem'ы. Зеркалит birthdaysFromWiki (та же
+ * DueOptions, та же upcoming/due-логика по grace/lookahead), но `target_date` —
+ * единичная абсолютная дата (parseIso), без yearly-повторения.
+ */
+export function targetDatesFromWiki(wikiDir: string, opts: DueOptions = {}): DueItem[] {
+	const now = opts.now ?? nowInZone(opts.defaultZone);
+	const zone = now.zoneName ?? 'local';
+	const graceMs = (opts.grace ?? DEFAULT_GRACE).toMillis();
+	const lookaheadMs = (opts.lookahead ?? DEFAULT_LOOKAHEAD).toMillis();
+	const items: DueItem[] = [];
+	const growthDir = join(wikiDir, 'growth');
+	if (!existsSync(growthDir)) return items;
+
+	for (const md of mdFiles(growthDir)) {
+		// P0-1 ([ADR-0011]): rel-путь от wikiDir, чтобы skip dot-папок совпал с birthdays.
+		const rel = relative(wikiDir, md);
+		if (shouldSkipRawPath(rel)) continue;
+		const fm = extractFrontmatter(readFileSync(md, 'utf8'));
+		if (!fm) continue;
+		// Опционально подстрахуемся типом: если type есть и это не growth — пропускаем.
+		const typeM = TYPE_FIELD.exec(fm);
+		if (typeM && typeM[1] && typeM[1].trim().toLowerCase() !== 'growth') continue;
+
+		const targetM = TARGET_DATE_FIELD.exec(fm);
+		if (!targetM || !targetM[1]) continue;
+		const occ = parseIso(targetM[1].trim(), zone);
+		if (occ === null) continue; // непарсибельный target_date — не роняем sweep
+
+		const due = occ.setZone(zone);
+		const deltaMs = due.toMillis() - now.toMillis();
+		let upcoming: boolean;
+		if (deltaMs <= graceMs) upcoming = false;
+		else if (deltaMs <= lookaheadMs) upcoming = true;
+		else continue;
+
+		const titleM = TITLE_FIELD.exec(fm);
+		const goal = titleM && titleM[1] ? titleM[1].trim() : basename(md, '.md');
+
+		items.push({
+			// Одноразовая дата — фиксируем ISO-день в id, чтобы было идемпотентно по дате.
+			id: `target:${basename(md, '.md')}:${due.toISODate()}`,
+			title: goal,
+			kind: 'target',
+			dueAt: due,
+			source: `wiki:${rel}`,
+			detail: goal,
+			upcoming,
+		});
+	}
+	return items;
+}
+
 // --- Главная функция: что due прямо сейчас ------------------------------------
 function alreadyFiredToday(rem: Reminder, now: DateTime): boolean {
 	if (!rem.lastFired) return false;
@@ -426,6 +487,8 @@ export function collectDueItems(
 	const reminders = loadReminders(remindersPath, zone);
 	const items = computeDue(reminders, { ...opts, now, defaultZone: zone });
 	items.push(...birthdaysFromWiki(wikiDir, { ...opts, now, defaultZone: zone }));
+	// [ADR-0021]: дедлайны growth-роадмапов (target_date) — параллельный wiki-date-источник.
+	items.push(...targetDatesFromWiki(wikiDir, { ...opts, now, defaultZone: zone }));
 	// Сначала строго-due (upcoming=false), потом по времени.
 	items.sort((a, b) => {
 		if (a.upcoming !== b.upcoming) return a.upcoming ? 1 : -1;

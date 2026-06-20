@@ -37,6 +37,11 @@ last_updated: 2026-06-10
 | [0015](0015-capture-write-path-permission-posture.md) | Capture-write-path: движок пишет файлы (`acceptEdits`, **без shell**), коммит per-turn делает **мост**; capture-текст маскируется до движка. Уточняет [0007](0007-engine-spawn-and-scheduler.md), ничего не superseded. | accepted |
 | [0016](0016-bot-persona-configurable-system-prompt.md) | Персона бота — настраиваемый системный промпт реактивного моста (`--append-system-prompt`, регистр-aware); контент **личный** (приватный `persona.md`), фреймворк = generic-дефолт + `persona.example.md`. | accepted |
 | [0017](0017-telegram-session-read-and-continue.md) | Telegram читает/продолжает локальные сессии Claude Code (`~/.claude/projects/`): отдельная полоса (cwd = проект, без персоны/вики), local-first (в сеть — только контекст хода), чтение без облака, `SESSIONS_ALLOWLIST` deny-by-default. Уточняет [0007](0007-engine-spawn-and-scheduler.md)/[0015](0015-capture-write-path-permission-posture.md), ничего не superseded. | accepted |
+| [0018](0018-finance-module.md) | Финансовый модуль: append-only леджер в приватном `raw/finance/`, мультивалютность (нативная валюта + `fx_rate` на момент синка), `finance-goal` с вычисляемым из леджера прогрессом. | accepted |
+| [0019](0019-knowledge-library-external-methodology.md) | Категория `knowledge/<topic>/` — внешняя source-attributed методология рядом с about-owner `wiki/` (Карпатый-механика, помеченные противоречия источников); портативный knowledge-package. | accepted |
+| [0020](0020-knowledge-library-fidelity-and-risk-tagging.md) | `knowledge/` хранит чужой метод с полной точностью + `risk:`-тегами и нейтральной рамкой, без эндорсмента; движок подаёт как claims источника, не директиву. | accepted |
+| [0021](0021-growth-target-date-scanned-into-reminders.md) | Дедлайны growth-страниц (`target_date`) сканируются в дайджест по образцу `birthdaysFromWiki` (единый источник даты цели). Уточняет [0007](0007-engine-spawn-and-scheduler.md). | accepted |
+| [0022](0022-knowledge-package-ingest-frontmatter-normalization.md) | Ингест knowledge-package нормализует frontmatter под контракт хранителя (sources/claims/status object-форма; `confidence` опц. для knowledge-claims; мирроринг + идемпотентность по версии). Уточняет [0019](0019-knowledge-library-external-methodology.md). | accepted |
 
 ## Сквозные темы
 
