@@ -668,7 +668,10 @@ describe('fx: CbrFxProvider с мокнутым fetch', () => {
 	 * Без реального сетевого запроса.
 	 */
 	function makeMockFetch(body: unknown): typeof fetch {
-		return async (_url: RequestInfo | URL, _init?: RequestInit) => {
+		// Параметры контекстно типизируются из `typeof fetch` (возвращаемый тип
+		// функции) — явная аннотация не нужна и тянула DOM-only тип RequestInfo,
+		// которого нет при lib: ES2022 (Node-глобал fetch без DOM).
+		return async (_url, _init) => {
 			return {
 				ok: true,
 				status: 200,
