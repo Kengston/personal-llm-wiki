@@ -1,0 +1,58 @@
+# lint-public.yml — CI backstop для Phase-0 Safety Gate.
+#
+# Назначение: убедиться, что публичный репо (personal-llm-wiki) не содержит
+# секретов, финансовых ключей или реальных PII перед каждым push/PR.
+#
+# Запускает `pnpm lint:public` — то же, что и локальный pre-commit guard
+# (src/scheduler/lint-public.ts), но в изолированном CI-окружении.
+#
+# Версии Node и pnpm берём из package.json:
+#   engines.node  >= 24.0.0   → используем node 24 (LTS)
+#   packageManager pnpm@9.12.3
+
+name: lint-public
+
+on:
+  push:
+    # Проверяем все ветки — случайный секрет может прийти из любой feature-ветки.
+    branches:
+      - '**'
+  pull_request:
+    branches:
+      - '**'
+
+jobs:
+  lint-public:
+    name: lint:public (secrets & PII guard)
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Получаем код репо (полную историю не нужна — достаточно HEAD).
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 2. Устанавливаем pnpm (версия из package.json::packageManager).
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9.12.3
+
+      # 3. Устанавливаем Node ≥24 (engines.node из package.json).
+      - name: Setup Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'pnpm'
+
+      # 4. Устанавливаем зависимости (frozen lockfile — детерминированная сборка).
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # 5. Компилируем TypeScript → dist/ (lint:public запускает node dist/...).
+      - name: Build
+        run: pnpm build
+
+      # 6. Запускаем guard. Выход != 0 → Job fail → PR заблокирован.
+      #    Выводим stderr явно, чтобы GitHub Actions показал нарушения в аннотациях.
+      - name: Run lint:public
+        run: pnpm lint:public

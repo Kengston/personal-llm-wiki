@@ -8,6 +8,11 @@
 *.pem
 secrets/
 
+# Defensive: финансовые данные в публичном репо появиться не должны никогда.
+# raw/finance/ живёт исключительно в приватном llm-wiki-content.
+# Если папка случайно окажется здесь — git её не подберёт (Phase-0 Safety Gate).
+raw/finance/
+
 # Engine auth dirs (subscription OAuth tokens live here)
 .codex/
 .grok/

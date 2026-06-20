@@ -69,6 +69,31 @@ const SECRET_RULES: readonly Rule[] = [
 	// URL c basic-auth внутри: scheme://user:pass@host.
 	{ kind: 'url_credentials', re: /\b[a-z][a-z0-9+.-]*:\/\/[^/\s:@]+:[^/\s:@]+@/g },
 
+	// Bybit v5 API key/secret и YooMoney-токен НЕ имеют отличительного префикса
+	// (в отличие от sk-…, ghp_…). Поэтому «голый» fixed-length match
+	// [A-Za-z0-9]{18}/{36}/{60,} недопустим — он ловит ЛЮБОЙ изолированный alnum
+	// (git-SHA, id, хэши из pnpm-lock) и даёт массовые ложные срабатывания:
+	// порча легального контента при записи И красный lint:public на чистом дереве.
+	// Ловим ТОЛЬКО явное присваивание (KEY=…); «голый» высокоэнтропийный токен
+	// добивает энтропийный детектор ниже по файлу.
+	{
+		kind: 'bybit_api_key_assigned',
+		// Явное присваивание: BYBIT_API_KEY=<значение>
+		re: /\bBYBIT_API_KEY\b\s*[=:]\s*['"]?([A-Za-z0-9]{10,})/gi,
+	},
+	{
+		kind: 'bybit_api_secret_assigned',
+		// Явное присваивание: BYBIT_API_SECRET=<значение>
+		re: /\bBYBIT_API_SECRET\b\s*[=:]\s*['"]?([A-Za-z0-9]{10,})/gi,
+	},
+	// YooMoney / ЮMoney OAuth access token — длинный непрозрачный токен высокой
+	// энтропии. Ловим явное присваивание YOOMONEY_TOKEN=…; «голый» токен ловит
+	// энтропийный детектор (без fixed-length rule, чтобы не плодить ложняки).
+	{
+		kind: 'yoomoney_token_assigned',
+		re: /\bYOOMONEY_TOKEN\b\s*[=:]\s*['"]?([^\s'";,]{20,})/gi,
+	},
+
 	// Присвоения секретов: password=..., api_key: "...", secret => '...'.
 	// (Python verbose `(?ix)` развёрнут в обычный JS-regex с флагом `i`.)
 	{
@@ -94,6 +119,14 @@ const PII_RULES: readonly Rule[] = [
 	},
 	// Bitcoin-адрес (legacy / bech32) — простое приближение.
 	{ kind: 'crypto_btc', re: /\b(?:bc1[a-z0-9]{20,60}|[13][A-HJ-NP-Za-km-z1-9]{25,34})\b/g },
+	// Ethereum-адрес: 0x + ровно 40 шестнадцатеричных символов.
+	// Bybit поддерживает вывод ETH/ERC-20, поэтому адрес кошелька — реальный PII.
+	// Пример (синтетический): 0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045 (не настоящий).
+	{ kind: 'crypto_eth', re: /\b0x[0-9a-fA-F]{40}\b/g },
+	// TRON-адрес (TRC-20 / USDT-TRC20): начинается с 'T', затем 33 символа Base58
+	// (алфавит без 0, O, I, l). Bybit также поддерживает вывод USDT по сети TRC-20.
+	// Пример (синтетический): TRxFJfFDf2HpD7PeHezF8DHe3yPxPkG9sX (не настоящий).
+	{ kind: 'crypto_tron', re: /\bT[1-9A-HJ-NP-Za-km-z]{33}\b/g },
 	// Телефоны: маскируем только «длинные»; детальный фильтр — в looksLikePhone.
 	{ kind: 'phone', re: /(?<![\w.])\+?\d[\d\s().-]{8,}\d(?![\w])/g },
 ];

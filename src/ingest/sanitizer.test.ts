@@ -211,6 +211,68 @@ describe('sanitizer — failClosedSanitize', () => {
 	});
 });
 
+// ── Phase-0 Safety Gate: финансовые / криптовалютные векторы ──────────────────
+// Эти тесты верифицируют ПЯТЬ паттернов, добавленных для функции «личный финансовый
+// трекер» (raw/finance/ в приватном репо). Все значения заведомо синтетические —
+// реальные ключи/адреса НИКОГДА не должны попадать в публичный репо.
+//
+// Векторы дублируют SYNTHETIC_MARKERS-файл (.test.ts) → lint-public.ts их пропускает
+// (SECRET_ILLUSTRATIVE_PATH_PARTS + PII_EXEMPT_PATH_PARTS оба включают '.test.ts').
+describe('sanitizer — Phase-0: финансовые паттерны (ярус-1 + ярус-2)', () => {
+	it('bybit_api_key_assigned — явное присваивание маскируется', () => {
+		// Синтетический фейковый ключ: BYBIT_API_KEY=FAKEbybitkey0123456789
+		// Паттерн /\bBYBIT_API_KEY\b\s*[=:]\s*['"]?([A-Za-z0-9]{10,})/gi захватывает
+		// весь матч включая «BYBIT_API_KEY=», поэтому проверяем, что значение ключа ушло,
+		// а окружающий текст (до и после) остался.
+		expectRedaction(
+			'env: BYBIT_API_KEY=FAKEbybitkey0123456789 # synthetic-example',
+			['FAKEbybitkey0123456789'],
+			['env:', '# synthetic-example'],
+		);
+	});
+
+	it('bybit_api_secret_assigned — явное присваивание маскируется', () => {
+		// Синтетический фейковый секрет: BYBIT_API_SECRET=FAKEbybitsecret0123456789abcdef012345
+		// Паттерн захватывает весь матч включая «BYBIT_API_SECRET=»; окружение сохраняется.
+		expectRedaction(
+			'config: BYBIT_API_SECRET=FAKEbybitsecret0123456789abcdef012345 # synthetic-example',
+			['FAKEbybitsecret0123456789abcdef012345'],
+			['config:', '# synthetic-example'],
+		);
+	});
+
+	it('yoomoney_token_assigned — явное присваивание маскируется', () => {
+		// Синтетический фейковый токен: YOOMONEY_TOKEN=FAKE.yoomoney.token.0123456789abcdef
+		// Паттерн захватывает «YOOMONEY_TOKEN=<значение>»; проверяем что значение ушло.
+		expectRedaction(
+			'config: YOOMONEY_TOKEN=FAKE.yoomoney.token.0123456789abcdef end',
+			['FAKE.yoomoney.token.0123456789abcdef'],
+			['config:', 'end'],
+		);
+	});
+
+	it('crypto_eth — Ethereum-адрес (0x + 40 hex) маскируется как PII', () => {
+		// Синтетический ETH-адрес: 0x + 40 нулей (явно не реальный кошелёк).
+		// Паттерн (ярус-2): /\b0x[0-9a-fA-F]{40}\b/g
+		expectRedaction(
+			'вывод на 0x0000000000000000000000000000000000000000 # synthetic-example',
+			['0x0000000000000000000000000000000000000000'],
+			['вывод на'],
+		);
+	});
+
+	it('crypto_tron — TRON-адрес (T + 33 Base58) маскируется как PII', () => {
+		// Синтетический TRON-адрес: T + 33 символа Base58 (нули — не входят в Base58,
+		// используем «1» как минимальный Base58-символ — заведомо фейковый адрес).
+		// Паттерн (ярус-2): /\bT[1-9A-HJ-NP-Za-km-z]{33}\b/g
+		expectRedaction(
+			'получатель T111111111111111111111111111111111 # synthetic-example',
+			['T111111111111111111111111111111111'],
+			['получатель'],
+		);
+	});
+});
+
 describe('sanitizer — shannonEntropy', () => {
 	it('пустая строка — 0', () => expect(shannonEntropy('')).toBe(0));
 	it('один символ повторён — 0', () => expect(shannonEntropy('aaaaaa')).toBe(0));

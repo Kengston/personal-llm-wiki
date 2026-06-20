@@ -102,6 +102,53 @@ const PII_PATTERNS: PiiPattern[] = [
 		regex: /(?:owner_chat_id|telegram_owner_chat_id)\s*[=:]\s*['"]?(\d{7,})/gi,
 		why: 'похоже на реальный Telegram owner chat_id',
 	},
+
+	// ── Финансовые / криптовалютные паттерны (Phase-0 Safety Gate) ─────────────
+	// ПАРИТЕТ с SECRET_RULES / PII_RULES в sanitizer.ts — ЭТИ ЖЕ ПЯТЬ ПАТТЕРНОВ
+	// должны ловить любой случайный коммит в публичный репо с реальным ключом/адресом.
+	//
+	// ВАЖНО: здесь намеренно НЕТ «голых» fixed-length правил типа [A-Za-z0-9]{18}.
+	// Они дают массовые ложные срабатывания (git-SHA, pnpm integrity-хэши, любые id).
+	// Bybit API key/secret ловим ТОЛЬКО через явное присваивание (KEY=…), а «голый»
+	// высокоэнтропийный токен добивает энтропийный детектор в scanSecrets().
+	// YooMoney — аналогично. ETH/TRON — структурный формат (0x+40hex / T+33base58).
+	{
+		// Явное присваивание BYBIT_API_KEY=<значение> (≥10 alnum).
+		// Паттерн идентичен SECRET_RULES[bybit_api_key_assigned] в sanitizer.ts.
+		name: 'bybit_api_key_assigned',
+		regex: /\bBYBIT_API_KEY\b\s*[=:]\s*['"]?([A-Za-z0-9]{10,})/gi,
+		why: 'похоже на явно присвоенный Bybit API Key',
+	},
+	{
+		// Явное присваивание BYBIT_API_SECRET=<значение> (≥10 alnum).
+		// Паттерн идентичен SECRET_RULES[bybit_api_secret_assigned] в sanitizer.ts.
+		name: 'bybit_api_secret_assigned',
+		regex: /\bBYBIT_API_SECRET\b\s*[=:]\s*['"]?([A-Za-z0-9]{10,})/gi,
+		why: 'похоже на явно присвоенный Bybit API Secret',
+	},
+	{
+		// Явное присваивание YOOMONEY_TOKEN=<значение> (≥20 непробельных символов).
+		// Паттерн идентичен SECRET_RULES[yoomoney_token_assigned] в sanitizer.ts.
+		name: 'yoomoney_token_assigned',
+		regex: /\bYOOMONEY_TOKEN\b\s*[=:]\s*['"]?([^\s'";,]{20,})/gi,
+		why: 'похоже на явно присвоенный YooMoney OAuth token',
+	},
+	{
+		// Ethereum-адрес: 0x + ровно 40 шестнадцатеричных символов.
+		// Bybit поддерживает вывод ETH/ERC-20 — реальный адрес кошелька это PII.
+		// Паттерн идентичен PII_RULES[crypto_eth] в sanitizer.ts.
+		name: 'crypto_eth',
+		regex: /\b0x[0-9a-fA-F]{40}\b/g,
+		why: 'Ethereum-адрес кошелька (0x + 40 hex)',
+	},
+	{
+		// TRON-адрес (TRC-20 / USDT): «T» + 33 символа Base58 (алфавит без 0, O, I, l).
+		// Bybit поддерживает вывод USDT по сети TRC-20 — реальный адрес кошелька это PII.
+		// Паттерн идентичен PII_RULES[crypto_tron] в sanitizer.ts.
+		name: 'crypto_tron',
+		regex: /\bT[1-9A-HJ-NP-Za-km-z]{33}\b/g,
+		why: 'TRON-адрес кошелька (T + 33 Base58)',
+	},
 ];
 
 const EXAMPLE_EMAIL_DOMAINS = ['example.com', 'example.org', 'example.net', 'primer.ru', 'test.local'];
