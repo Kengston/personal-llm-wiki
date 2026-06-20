@@ -183,7 +183,31 @@ export async function handleJob(state: BridgeState, job: Job): Promise<void> {
 		try {
 			res = await runEngineWithRetry(state.engine, safeText, sessionId);
 		} catch (exc) {
-			if (exc instanceof EngineError) {
+			// Сессия резюма исчезла (claude: "No conversation found with session ID"): мост
+			// запомнил session_id, который не персистнулся на диск. Сбрасываем привязку
+			// chat→session и повторяем ОДИН раз свежим ходом — состояние второго мозга живёт
+			// в вики (raw/ + wiki/), а не в сессии чата, поэтому потеря контекста безопасна.
+			if (sessionId && exc instanceof EngineError && /no conversation found/i.test(String(exc))) {
+				log.warn(
+					{ chatId: job.chatId, sessionId, error: String(exc) },
+					'engine.session_lost_retry_fresh',
+				);
+				state.store.resetSession(job.chatId);
+				try {
+					res = await runEngineWithRetry(state.engine, safeText, null);
+				} catch (exc2) {
+					if (exc2 instanceof EngineError) {
+						log.warn({ chatId: job.chatId, error: String(exc2) }, 'engine.failed');
+						await state.telegram.sendMessage(
+							job.chatId,
+							'Не удалось обработать сообщение (движок недоступен или превышен лимит). ' +
+								'Попробуй ещё раз чуть позже.',
+						);
+						return null;
+					}
+					throw exc2;
+				}
+			} else if (exc instanceof EngineError) {
 				log.warn({ chatId: job.chatId, error: String(exc) }, 'engine.failed');
 				await state.telegram.sendMessage(
 					job.chatId,
@@ -191,8 +215,9 @@ export async function handleJob(state: BridgeState, job: Job): Promise<void> {
 						'Попробуй ещё раз чуть позже.',
 				);
 				return null;
+			} else {
+				throw exc;
 			}
-			throw exc;
 		}
 		if (res.sessionId) state.store.upsertSession(job.chatId, res.sessionId);
 
