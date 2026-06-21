@@ -16,6 +16,7 @@
 - **Перед ответом/правкой** — прочитать `wiki/index.md`, затем релевантные страницы (`index.md` → нужные файлы → их `## Связанные`/`sources`). Не отвечать «по памяти движка».
 - **Перед предложением нового claim'а** про сущность — перечитать секцию **негативной памяти** этой страницы (§7): не воскрешать отвергнутое.
 - **Перед созданием новой страницы человека/идеи/концепции/проекта** — поискать существующую (дедуп, §8): не плодить дубли «Иван Пример» и «И. Пример».
+- **На вопрос по методологии / поиску работы (внешнее знание, §3a) — index-first:** сперва прочитать `knowledge/<topic>/index.md`, затем нужные страницы топика (не «по памяти движка», не сразу в content-страницу). Точка входа в топики — секция **«Базы знаний»** в `wiki/index.md` (§3.8/§10), которая линкует каждый `knowledge/<topic>/index.md` relative-путём.
 
 ## 2. Обязанности sanitizer (write-path, fail-closed)
 
@@ -235,15 +236,117 @@ last_updated: 2026-05-31
 ### 3.8. `wiki/profile.md` (`type: profile`) и `wiki/index.md` (`type: index`)
 
 - **`profile.md`** — страница обо мне: устойчивые предпочтения, факты, привычки, ценности (claim'ы как у person). Сюда capture кладёт «я предпочитаю…», «я работаю в…».
-- **`index.md`** — каталог всех страниц по категориям (ideas/concepts/growth/people/projects/journal + capability-profile). **Читается первым** (§1). One-line-саммари — **конкретные** (расплывчатые → движок берёт не ту страницу, реальный провал — [research/memory-architecture.md](../docs/research/memory-architecture.md)). Формат — §10.
+- **`index.md`** — каталог всех страниц по категориям (ideas/concepts/growth/people/projects/journal + capability-profile). **Читается первым** (§1). One-line-саммари — **конкретные** (расплывчатые → движок берёт не ту страницу, реальный провал — [research/memory-architecture.md](../docs/research/memory-architecture.md)). Несёт секцию **«Базы знаний»** — мост в категорию-сосед `knowledge/` ([ADR-0019](../docs/adr/0019-knowledge-library-external-methodology.md), §3a): линки на каждый `knowledge/<topic>/index.md` для index-first маршрутизации запросов по методологии (§1). Формат — §10.
 
 > **Провенанс источников.** Отдельных entity-страниц `type: source` в вики **нет** (контент-модель [ADR-0010](../docs/adr/0010-wiki-content-model.md) их не вводит): провенанс живёт во frontmatter-поле `sources:` каждой страницы (пути в `raw/`) и в самих `raw/`-файлах (provenance-frontmatter: `source`, `exported_at`, watermark-cursor). Watermark-курсоры — служебные, в [src/ingest/watermark.ts](../src/ingest/watermark.ts) и `raw/.watermarks/`, не в `wiki/`.
+
+## 3a. Анатомия страниц `knowledge/` — внешняя source-attributed методология ([ADR-0019](../docs/adr/0019-knowledge-library-external-methodology.md), [ADR-0020](../docs/adr/0020-knowledge-library-fidelity-and-risk-tagging.md))
+
+**`knowledge/` — НЕ про владельца.** Это **новая top-категория** приватного контент-репо, **сосед** `wiki/` (не раздел внутри неё): переиспользуемая внешняя методология, втягиваемая из **многих источников** (первый кейс — гайд по поиску работы → `knowledge/job-search/`). Механика — чистый Карпатый ([ADR-0002](../docs/adr/0002-no-embedder-pure-karpathy.md)): свой `index.md`-маршрутизатор, кросс-ссылки relative-путями, compile-once, помеченные межисточниковые противоречия. Все примеры здесь — синтетические.
+
+> **Граница «external knowledge vs about-owner».** Страницы `knowledge/` — это **что сказал источник**, а не факты о владельце. Их **НИКОГДА** не промоутят/не компилируют в `wiki/` (about-owner): они живут только в дереве-соседе `knowledge/`. Личный слой (`wiki/growth/<topic>.md`) **ссылается** в `knowledge/` relative-путём, **не дублирует** метод. Обратно: про-владельца факт (мой прогресс, моя цель) **не** пишется в `knowledge/` — он в `wiki/`.
+
+### 3a.1. `type: knowledge` → `knowledge/<topic>/<slug>.md` — содержательная страница метода
+
+Один приём/раздел методологии источника. **Source-attribution обязательна** (`sources:` с датой/актуальностью). Метод источника передаём **с полной точностью** ([ADR-0020]) — спорное **не выбрасываем**, а помечаем `risk:` + нейтральной рамкой.
+
+```markdown
+---
+title: Резюме под ATS-парсер
+type: knowledge
+status: active                # draft | active | verified | stale | superseded | archived
+last_updated: 2026-06-20T12:00:00+03:00
+risk: grey                    # опц.: grey (этич. спорно) | legal (юр.-чувствит.) | stale (могло устареть)
+sources:                      # ОБЯЗАТЕЛЬНО: атрибуция источника
+  - {name: "Гайд по поиску работы (внешний)", date: 2025-11, freshness: current, url: "../../raw/knowledge/job-search/guide-2025-11.md"}
+claims:
+  - {id: claim_1a2b, text: "Источник: ключевые слова из вакансии дублировать дословно в резюме", confidence: 0.8, status: active, sources: ["../../raw/knowledge/job-search/guide-2025-11.md"]}
+---
+
+# Резюме под ATS-парсер
+
+Связная проза: что советует источник, как он это обосновывает, шаги метода (с атрибуцией «источник советует …», не директивой «делай так»).
+
+## Шаги
+1. …
+
+## Риски и оговорки
+<!-- обязательно при наличии risk: — нейтральная рамка по ADR-0020 -->
+- Источник советует X; риск Y (`risk: grey` — этически спорно: граничит с накруткой релевантности).
+- Подаётся как **claim источника**, не как персональная рекомендация. Решение — за владельцем.
+
+## Связанные
+- [index.md](index.md) · [glossary.md](glossary.md)
+```
+
+- **`sources:` (обязательно)** — список объектов с атрибуцией: `name`/`id` источника, `date`/`url` (ссылка в `raw/`), `freshness` (`current|aging|stale` — насколько актуален исходник). Без атрибуции страница невалидна (lint, §9).
+- **`risk:` (опц.)** — `grey` (этически спорно), `legal` (юридически/налогово чувствительно), `stale` (приём мог устареть). Наличие `risk:` **требует** секции `## Риски и оговорки`.
+- **`## Риски и оговорки`** — нейтральная рамка ([ADR-0020]): «источник советует X; риск Y», подача как **claim источника с атрибуцией**, **никогда** как директива «делай так». Юр./налогово чувствительное несёт пометку «справка, не персональная консультация».
+- **claims** — те же поля (§4), но `text` формулируется **с атрибуцией к источнику** («Источник: …»), т.к. это чужое утверждение, не факт о владельце. **`confidence` — опционально** для knowledge-claims: §4 определяет его как оценку движка, а у внешнего утверждения на момент ингеста её нет (движок может проставить позже при оценке/кросс-сверке). Внешний knowledge-package втягивается **трансформацией формы** под этот контракт, не verbatim ([ADR-0022](../docs/adr/0022-knowledge-package-ingest-frontmatter-normalization.md)).
+
+### 3a.2. `type: knowledge-index` → `knowledge/<topic>/index.md` — каталог-маршрутизатор (служебная)
+
+Точка маршрутизации запроса по топику: каталог всех `knowledge`-страниц топика с **конкретными** one-line-саммари (расплывчатые → движок берёт не ту страницу). **Служебная страница: НЕ требует `claims[]` и НЕ требует секции `## Шаги`.** Frontmatter — общие поля (`title`, `type: knowledge-index`, `status`, `last_updated`); `sources:` опционально (агрегат источников топика).
+
+```markdown
+---
+title: Поиск работы — каталог методологии
+type: knowledge-index
+status: active
+last_updated: 2026-06-20T12:00:00+03:00
+---
+
+# Поиск работы — каталог методологии
+
+Внешняя методология (источник №1 — гайд 2025-11). Это знание **не про владельца**; личный роадмап — в [../../wiki/growth/job-search.md](../../wiki/growth/job-search.md).
+
+## Разделы
+- [Резюме под ATS-парсер](resume-ats.md) — дублировать ключевые слова вакансии (⚠ `risk: grey`).
+- [Подготовка к собеседованию](interview-prep.md) — метод STAR для поведенческих вопросов.
+
+## Источники
+- Гайд по поиску работы (внешний), 2025-11 — `../../raw/knowledge/job-search/guide-2025-11.md`.
+
+## Связанные
+- [glossary.md](glossary.md)
+```
+
+### 3a.3. `type: knowledge-glossary` → `knowledge/<topic>/glossary.md` — глоссарий топика (служебная)
+
+Термины методологии топика. **Служебная страница: НЕ требует `claims[]` и НЕ требует секции `## Шаги`.** Frontmatter — общие поля (`title`, `type: knowledge-glossary`, `status`, `last_updated`).
+
+```markdown
+---
+title: Поиск работы — глоссарий
+type: knowledge-glossary
+status: active
+last_updated: 2026-06-20T12:00:00+03:00
+---
+
+# Поиск работы — глоссарий
+
+- **ATS** — Applicant Tracking System, парсер резюме на стороне работодателя.
+- **STAR** — Situation/Task/Action/Result, рамка ответа на поведенческий вопрос.
+
+## Связанные
+- [index.md](index.md)
+```
+
+### 3a.4. Кросс-источниковые противоречия — ОБНОВЛЯТЬ и ФЛАЖИТЬ, не перезаписывать ([ADR-0019])
+
+Новый источник по уже покрытому топику **обновляет** топиковые страницы и **флажит расхождения inline**, а **не** перезаписывает и **не** плодит дубль-страницу:
+
+- Совпадает с существующим — усилить claim/добавить второй источник в `sources:` той же страницы (как `verified`, §4).
+- Расходится — оставить оба как claims источников и пометить inline: `> ⚠ источник B расходится: <в чём>` (по образцу `superseded`-механики §7, но между **источниками**, а не во времени). Метод каждого источника сохраняется верно ([ADR-0020]) — для честного сравнения.
+- **Не** создавать `resume-ats-v2.md` под второй источник того же приёма — это один топик, одна страница, несколько атрибутированных claims.
+
+> **Провенанс knowledge.** Сырой транскрипт/исходник методологии — иммутабельно в `raw/knowledge/<topic>/` (через sanitizer §2); выжимка-метод — в `knowledge/<topic>/`. Полные детали источника **не** копируем в `knowledge/`-прозу — на них ссылается `sources:` (как §3.5 для проектов).
 
 ## 4. Анатомия claim'а
 
 Стабильный факт — атомарный `claim` во frontmatter (наследует `abcage-wiki`, упрощено для личного: без trust-score/agreement-механики хаба).
 
-- **Поля:** `id` (`claim_<4hex>`, генерит движок), `text` (факт одной фразой), `sources` (список путей в `raw/`/внешних ref), `confidence` (0..1, оценка движка), `status` (`active|verified|stale|rejected|superseded`).
+- **Поля:** `id` (`claim_<4hex>`, генерит движок), `text` (факт одной фразой), `sources` (список путей в `raw/`/внешних ref), `confidence` (0..1, оценка движка; **опц. для knowledge-claims** — §3a.1, [ADR-0022](../docs/adr/0022-knowledge-package-ingest-frontmatter-normalization.md)), `status` (`active|verified|stale|rejected|superseded`).
 - **`id` стабилен** при обновлении факта: меняются `text`/`confidence`/`status`/`last_updated`, **не** `id`. Уникальность `id` — **в пределах страницы** (cross-page коллизии ок, изоляция через путь).
 - **`verified`** — факт подтверждён ≥2 независимыми источниками **или** явным подтверждением от меня в Telegram. Иначе `active`.
 - **Граница «вики vs эфемерное» (жёстко).** В claim **не** кладём текучее: «во сколько встреча завтра», «какой счёт в игре», «сколько сейчас задач». Такое — в `reminders/` (§5) или вовсе не персистится. Смешение убивает доверие к базе ([CONTEXT §2](../CONTEXT.md)).
@@ -392,6 +495,7 @@ last_updated: 2026-05-31
 - **Расхождение reminder ↔ вики:** `birthday`/`target_date` в странице не совпадает с `due_at` reminder'а.
 - **Поднятие из journal:** устойчивое, осевшее в journal-днях, → предложить вынести в idea/concept/growth/person/project.
 - **Дрейф capability-profile:** в `projects/` появились/изменились `skills:`, не отражённые в `capability-profile.md` → предложить пересборку деривативной страницы (§3.6).
+- **Knowledge-инварианты (§3a, [ADR-0019](../docs/adr/0019-knowledge-library-external-methodology.md)/[ADR-0020](../docs/adr/0020-knowledge-library-fidelity-and-risk-tagging.md)):** `type: knowledge`-страница без `sources:`-атрибуции; `risk:` проставлен, но нет секции `## Риски и оговорки`; топик в `knowledge/` без линка из секции «Базы знаний» в `wiki/index.md`; about-owner факт, просочившийся в `knowledge/`, или knowledge-метод, продвинутый в `wiki/` (нарушение границы §3a).
 - **(Наблюдаемость trip-wire ADR-0002)** при росте корпуса логировать в `log.md`, какие страницы движок выбирал на запрос; устойчивый wrong-page-rate / `index.md` > ~40–50K токенов → сигнал к лексическому FTS5 (не вектора — [research/memory-architecture.md](../docs/research/memory-architecture.md)).
 
 Линт **публичного** репо — отдельный, кодовый: [src/scheduler/lint-public.ts](../src/scheduler/lint-public.ts) (`scanSecrets`, exit≠0). См. [AGENTS.md](../AGENTS.md).
@@ -418,6 +522,10 @@ last_updated: 2026-05-31
 
 ## Профиль способностей
 - [capability-profile.md](capability-profile.md) — сводка компетенций из проектов.
+
+## Базы знаний
+<!-- мост в категорию-сосед knowledge/ (§3a, ADR-0019); index-first маршрутизация (§1) -->
+- [Поиск работы](../knowledge/job-search/index.md) — внешняя методология (источник №1 — гайд 2025-11); личный роадмап — в [growth/job-search.md](growth/job-search.md).
 ```
 
 При росте — шардить `index.md` по категориям (ideas/concepts/growth/people/projects/journal), frontmatter-теги для дешёвого `ripgrep`-префильтра.

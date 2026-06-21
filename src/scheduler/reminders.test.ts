@@ -18,6 +18,7 @@ import {
 	nextOccurrence,
 	parseIso,
 	parseReminders,
+	targetDatesFromWiki,
 } from './reminders.js';
 
 const NOW = DateTime.fromISO('2026-06-08T10:00:00+03:00', { setZone: true });
@@ -169,6 +170,67 @@ describe('birthdaysFromWiki', () => {
 	});
 });
 
+describe('targetDatesFromWiki (growth target_date)', () => {
+	let dir: string;
+	beforeEach(() => {
+		dir = mkdtempSync(join(tmpdir(), 'growth-test-'));
+	});
+	afterEach(() => {
+		rmSync(dir, { recursive: true, force: true });
+	});
+
+	// Страница growth-роадмапа в wiki/growth/<name>.md.
+	const growth = (name: string, body: string): void => {
+		const g = join(dir, 'growth');
+		mkdirSync(g, { recursive: true });
+		writeFileSync(join(g, name), body, 'utf8');
+	};
+
+	it('target_date в пределах grace → due (upcoming=false); detail = заголовок', () => {
+		// target_date в +2 минутах от NOW → внутри grace (5 мин) → строго-due.
+		growth('linkedin.md', '---\ntitle: Прокачать LinkedIn\ntarget_date: 2026-06-08T10:02:00+03:00\n---\n# Цель\n');
+		const items = targetDatesFromWiki(dir, { now: NOW });
+		expect(items).toHaveLength(1);
+		expect(items[0]?.kind).toBe('target');
+		expect(items[0]?.upcoming).toBe(false);
+		expect(items[0]?.title).toBe('Прокачать LinkedIn');
+		expect(items[0]?.detail).toBe('Прокачать LinkedIn');
+		expect(items[0]?.source).toBe('wiki:growth/linkedin.md'); // rel от wikiDir, не от growth/
+	});
+
+	it('target_date в пределах lookahead → upcoming=true', () => {
+		growth('resume.md', '---\ntitle: Обновить резюме\ntarget_date: 2026-06-12T10:00:00+03:00\n---\n');
+		const items = targetDatesFromWiki(dir, { now: NOW });
+		expect(items).toHaveLength(1);
+		expect(items[0]?.upcoming).toBe(true);
+	});
+
+	it('target_date дальше lookahead → исключён', () => {
+		growth('far.md', '---\ntitle: Далёкая цель\ntarget_date: 2026-07-01T10:00:00+03:00\n---\n');
+		expect(targetDatesFromWiki(dir, { now: NOW })).toHaveLength(0);
+	});
+
+	it('type не growth → страница пропускается', () => {
+		growth('stray.md', '---\ntitle: Чужой тип\ntype: person\ntarget_date: 2026-06-08T10:02:00+03:00\n---\n');
+		expect(targetDatesFromWiki(dir, { now: NOW })).toHaveLength(0);
+	});
+
+	it('непарсибельный target_date не роняет sweep → пусто', () => {
+		growth('broken.md', '---\ntitle: Битая дата\ntarget_date: не дата\n---\n');
+		expect(targetDatesFromWiki(dir, { now: NOW })).toHaveLength(0);
+	});
+
+	it('id фиксирует ISO-дату → идемпотентность по дате', () => {
+		growth('apply.md', '---\ntitle: Подать заявки\ntarget_date: 2026-06-08T10:02:00+03:00\n---\n');
+		const items = targetDatesFromWiki(dir, { now: NOW });
+		expect(items[0]?.id).toBe('target:apply:2026-06-08');
+	});
+
+	it('нет каталога growth/ → пусто (валидно)', () => {
+		expect(targetDatesFromWiki(dir, { now: NOW })).toEqual([]);
+	});
+});
+
 describe('collectDueItems (интеграция)', () => {
 	let dir: string;
 	beforeEach(() => {
@@ -195,6 +257,23 @@ describe('collectDueItems (интеграция)', () => {
 		expect(items[1]?.upcoming).toBe(true); // upcoming-ДР после
 	});
 
+	it('growth-дедлайн внутри окна попадает в собранные due (ADR-0021)', () => {
+		const remPath = join(dir, 'reminders.md'); // намеренно нет файла — источник только wiki/growth
+		const wiki = join(dir, 'wiki');
+		const g = join(wiki, 'growth');
+		mkdirSync(g, { recursive: true });
+		// Строго-due цель (в пределах grace).
+		writeFileSync(join(g, 'now-goal.md'), '---\ntitle: Цель сегодня\ntarget_date: 2026-06-08T10:02:00+03:00\n---\n', 'utf8');
+		// Дальняя цель — за окном lookahead, в сборку попасть НЕ должна.
+		writeFileSync(join(g, 'far-goal.md'), '---\ntitle: Цель потом\ntarget_date: 2026-07-15T10:00:00+03:00\n---\n', 'utf8');
+
+		const items = collectDueItems(remPath, wiki, { now: NOW });
+		const targets = items.filter((i) => i.kind === 'target');
+		expect(targets).toHaveLength(1);
+		expect(targets[0]?.title).toBe('Цель сегодня');
+		expect(targets[0]?.upcoming).toBe(false);
+	});
+
 	it('пустой путь reminders → пусто (валидно)', () => {
 		expect(loadReminders(join(dir, 'нет.md'))).toEqual([]);
 	});
@@ -213,5 +292,75 @@ describe('advanceSpaced (Leitner)', () => {
 	it('потолок на последней ступени', () => {
 		expect(advanceSpaced(4)).toEqual([4, 35]);
 		expect(advanceSpaced(10)).toEqual([4, 35]);
+	});
+});
+
+// Механики «sweep» для job-search-кейсов на формате стора reminders.md.
+// В коде НЕТ единой мутирующей sweep-функции (она спавнит движок) — тестируем
+// наблюдаемые контракты на РЕАЛЬНОМ экспортируемом API из примитивов, которыми
+// продвижение собирается: nextOccurrence (recurring), advanceSpaced (Leitner),
+// computeDue (oneoff→done + дедуп по last_fired на коалесцированном двойном run'е).
+describe('sweep-механики (job-search-кейсы на формате стора)', () => {
+	const mk = (over: Record<string, string>): string =>
+		['---', ...Object.entries(over).map(([k, v]) => `${k}: ${v}`)].join('\n');
+
+	it("recurring rrule продвигает due_at к следующему вхождению (еженедельный апдейт LinkedIn)", () => {
+		// Еженедельная задача из рутины job-search; due_at этой недели уже отстрелян.
+		const rem = parseReminders(
+			mk({
+				id: 'linkedin-weekly',
+				kind: 'recurring',
+				rrule: 'FREQ=WEEKLY;BYDAY=MO',
+				created: '2026-06-01T09:00:00+03:00', // понедельник 01.06
+				due_at: '2026-06-08T09:00:00+03:00', // текущее вхождение (пн 08.06)
+			}),
+		)[0];
+		expect(rem?.dueAt?.isValid).toBe(true);
+		// Следующее срабатывание строго после текущего due → понедельник 15.06.
+		const next = nextOccurrence(rem!.rrule!, rem!.created!, rem!.dueAt!, false);
+		expect(next?.weekday).toBe(1); // luxon: понедельник = 1
+		expect(next?.day).toBe(15);
+		expect(next?.month).toBe(6);
+		expect(next?.toMillis()).toBeGreaterThan(rem!.dueAt!.toMillis());
+	});
+
+	it('spaced продвигает ступень Leitner и интервал (idea-resurfacing совета по собесам)', () => {
+		// spaced-карточка совета: box=1 на старте; «вспомнили» → следующая ступень.
+		const rem = parseReminders(
+			mk({ id: 'tip-star-method', kind: 'spaced', box: '1', interval_days: '3' }),
+		)[0];
+		expect(rem?.box).toBe(1);
+		const [newBox, intervalDays] = advanceSpaced(rem!.box);
+		expect(newBox).toBe(2);
+		expect(intervalDays).toBe(7); // лесенка 1→3→7→16→35
+	});
+
+	it('oneoff в прошлом со status=done исключён (отработал → не повторяется)', () => {
+		// Разовая задача «откликнуться на вакансию» уже выполнена.
+		const rems = parseReminders(
+			mk({ id: 'apply-acme', kind: 'oneoff', due_at: '2026-06-08T10:01:00+03:00', status: 'done' }),
+		);
+		expect(computeDue(rems, { now: NOW })).toHaveLength(0);
+	});
+
+	it('коалесцированный двойной run не дублит: last_fired сегодня → дедуп', () => {
+		// Sweep сработал дважды за день (коалесценция cron'а) — второй раз молчим.
+		const text = mk({
+			id: 'followup-recruiter',
+			kind: 'oneoff',
+			due_at: '2026-06-08T10:01:00+03:00',
+			last_fired: '2026-06-08T08:00:00+03:00',
+		});
+		const rems = parseReminders(text);
+		// Первый «логический» run без last_fired стрельнул бы; с проставленным
+		// last_fired сегодняшнего дня повторный run уже ничего не отдаёт.
+		expect(computeDue(rems, { now: NOW })).toHaveLength(0);
+		// Контроль: без last_fired та же задача строго-due (значит дедупит именно он).
+		const fresh = parseReminders(
+			mk({ id: 'followup-recruiter', kind: 'oneoff', due_at: '2026-06-08T10:01:00+03:00' }),
+		);
+		const due = computeDue(fresh, { now: NOW });
+		expect(due).toHaveLength(1);
+		expect(due[0]?.upcoming).toBe(false);
 	});
 });

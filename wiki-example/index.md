@@ -33,8 +33,12 @@ wiki-example/
 │   └── sample-idea-from-chat.md   # идея, извлечённая из LLM-чата
 ├── journal/                 # датированные дневниковые записи (одна на день)
 │   └── 2025-01-15.md
-└── reminders/               # пример due-напоминания (формат scheduler, ADR-0007)
-    └── example.md
+├── reminders/               # пример due-напоминания (формат scheduler, ADR-0007)
+│   └── example.md
+└── knowledge/               # категория-СОСЕД: внешняя source-attributed методология (ADR-0019), НЕ про владельца
+    └── sourdough-baking/    # синтетический нейтральный топик
+        ├── index.md         # каталог-маршрутизатор топика (type: knowledge-index)
+        └── starter-refresh.md  # страница метода с sources: + risk: grey
 ```
 
 ## Профиль капабилити
@@ -62,6 +66,10 @@ wiki-example/
 
 ## Напоминания (proactive)
 - [reminders/example.md](reminders/example.md) — пример «купить подарок Ивану» (выдуман): one-off due-напоминание в формате [scheduler](../scheduler/) ([ADR-0007](../docs/adr/0007-engine-spawn-and-scheduler.md)). Эфемерное — здесь, не в вики-прозе ([CONTEXT §2](../CONTEXT.md)).
+
+## Базы знаний (knowledge)
+<!-- мост в категорию-сосед knowledge/ (§3a контракта, ADR-0019); index-first маршрутизация (§1). knowledge/ — внешняя source-attributed методология, НЕ про владельца. -->
+- [knowledge/sourdough-baking/index.md](knowledge/sourdough-baking/index.md) — «Закваска и хлеб» (выдумано, synthetic-example): внешняя методология из источника с атрибуцией (`sources:`) + демо risk-дисциплины (одна страница несёт `risk: grey` + секцию «Риски и оговорки») ([ADR-0019](../docs/adr/0019-knowledge-library-external-methodology.md), [ADR-0020](../docs/adr/0020-knowledge-library-fidelity-and-risk-tagging.md)).
 
 ## Журнал
 - [log.md](log.md) — хронология операций над этой примерной викой (что ингестили, что спрашивали, что линтили).
