@@ -36,9 +36,22 @@ import { commitIfDirty } from './writeback.js';
 
 const log = childLogger('bridge.app');
 
+/** Данные нажатия инлайн-кнопки (callback_query, [ADR-0023]). */
+export interface CallbackInfo {
+	/** callback_query.id — для answerCallbackQuery (погасить «часики»). */
+	id: string;
+	/** callback_data кнопки (что нажали; задаём мы при создании клавиатуры). */
+	data: string;
+	/** message_id сообщения с кнопкой — для будущих editMessage* (drill-down). */
+	messageId?: number;
+}
+
 export interface Job {
 	chatId: number;
+	/** Текст сообщения; для callback-джобы — callback_data нажатой кнопки. */
 	text: string;
+	/** Присутствует, если джоба — нажатие инлайн-кнопки (а не сообщение). */
+	callback?: CallbackInfo;
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -93,9 +106,14 @@ export class BridgeState {
 /**
  * Вытащить Job из update. None (→ игнор), если: не текстовое сообщение;
  * chat.id != owner (слой №2, single-user); текст пустой. Поддерживаем
- * message и edited_message.
+ * message, edited_message и callback_query (нажатие инлайн-кнопки, [ADR-0023]).
  */
 export function extractJob(update: Record<string, unknown>, ownerChatId: number): Job | null {
+	// callback_query (нажатие инлайн-кнопки) — отдельная ветка ([ADR-0023]).
+	if (isRecord(update.callback_query)) {
+		return extractCallbackJob(update.callback_query, ownerChatId);
+	}
+
 	const message = isRecord(update.message)
 		? update.message
 		: isRecord(update.edited_message)
@@ -119,6 +137,36 @@ export function extractJob(update: Record<string, unknown>, ownerChatId: number)
 	return { chatId, text: text.trim() };
 }
 
+/**
+ * Вытащить callback-Job из callback_query ([ADR-0023]). Слой №2 (allow-list)
+ * проверяем по `from.id` — это ИНИЦИАТОР нажатия, он есть всегда (в отличие от
+ * `message`, который Telegram опускает у старых сообщений). В приватном чате
+ * from.id == chat.id == owner, поэтому это корректный single-user-гейт.
+ */
+function extractCallbackJob(
+	callbackQuery: Record<string, unknown>,
+	ownerChatId: number,
+): Job | null {
+	const from = isRecord(callbackQuery.from) ? callbackQuery.from : {};
+	const fromId = from.id;
+	if (typeof fromId !== 'number' || fromId !== ownerChatId) {
+		log.warn({ fromId }, 'security.foreign_callback_dropped');
+		return null;
+	}
+
+	const id = callbackQuery.id;
+	if (typeof id !== 'string' || !id) return null;
+	const data = typeof callbackQuery.data === 'string' ? callbackQuery.data : '';
+
+	// chatId для ответа берём из message.chat.id; если message опущен — отвечаем владельцу.
+	const message = isRecord(callbackQuery.message) ? callbackQuery.message : null;
+	const chat = message && isRecord(message.chat) ? message.chat : null;
+	const chatId = chat && typeof chat.id === 'number' ? chat.id : ownerChatId;
+	const messageId = message && typeof message.message_id === 'number' ? message.message_id : undefined;
+
+	return { chatId, text: data, callback: { id, data, messageId } };
+}
+
 // --------------------------------------------------------------------------- //
 // Воркер очереди                                                              //
 // --------------------------------------------------------------------------- //
@@ -138,6 +186,12 @@ async function worker(state: BridgeState, workerId: number): Promise<void> {
 }
 
 export async function handleJob(state: BridgeState, job: Job): Promise<void> {
+	// Нажатие инлайн-кнопки ([ADR-0023]) — отдельная ветка ДО текстовой обработки.
+	if (job.callback) {
+		await handleCallbackQuery(state, job, job.callback);
+		return;
+	}
+
 	// Команда /reset — забыть сессию.
 	if (job.text.trim() === '/reset') {
 		state.store.resetSession(job.chatId);
@@ -239,6 +293,30 @@ export async function handleJob(state: BridgeState, job: Job): Promise<void> {
 		{ chatId: job.chatId, usage: result.usage, answerChars: result.answer.length },
 		'job.done',
 	);
+}
+
+// --------------------------------------------------------------------------- //
+// Нажатие инлайн-кнопки (callback_query, [ADR-0023])                          //
+// --------------------------------------------------------------------------- //
+
+/**
+ * Обработать нажатие инлайн-кнопки. Сейчас это ФУНДАМЕНТ транспорта: кнопочных
+ * фич ещё нет (финансовые [Оплачено]/[Отложить], селекторы периода — отдельно),
+ * поэтому диспетчеризации по callback_data нет. Гасим «часики» на кнопке и логируем.
+ *
+ * Инвариант на будущее: когда здесь появятся фичи, кормящие callback_data движку
+ * (как ход или resume), их данные ОБЯЗАНЫ пройти failClosedSanitize ДО облака —
+ * ровно как текстовый ход в handleJob (§2/[ADR-0015]). Сейчас callback_data никуда
+ * наружу/в облако не уходит, поэтому маскер тут не нужен.
+ */
+async function handleCallbackQuery(
+	state: BridgeState,
+	job: Job,
+	cb: CallbackInfo,
+): Promise<void> {
+	// Best-effort: без ответа кнопка крутит «часики» у владельца до таймаута.
+	await state.telegram.answerCallbackQuery(cb.id);
+	log.info({ chatId: job.chatId, data: cb.data, messageId: cb.messageId }, 'callback.received');
 }
 
 // --------------------------------------------------------------------------- //

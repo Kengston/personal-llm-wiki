@@ -57,6 +57,9 @@ function fakeTelegram(getUpdates: TelegramClient['getUpdates']): TelegramClient 
 		getUpdates,
 		async deleteWebhook() {},
 		async sendMessage() {},
+		async sendPhoto() {},
+		async sendDocument() {},
+		async answerCallbackQuery() {},
 		async sendChatAction() {},
 		async getMe() {
 			return {};

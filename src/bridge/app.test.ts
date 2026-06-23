@@ -33,6 +33,9 @@ class FakeEngine implements Engine {
 class FakeTelegram implements TelegramClient {
 	sent: { chatId: number; text: string }[] = [];
 	actions: { chatId: number; action: string }[] = [];
+	photos: { chatId: number }[] = [];
+	documents: { chatId: number }[] = [];
+	answeredCallbacks: string[] = [];
 	me: Record<string, unknown> = { username: 'second_brain_bot' };
 	getMeError: Error | null = null;
 	private waiters: (() => void)[] = [];
@@ -40,6 +43,15 @@ class FakeTelegram implements TelegramClient {
 	async sendMessage(chatId: number, text: string): Promise<void> {
 		this.sent.push({ chatId, text });
 		this.waiters.splice(0).forEach((w) => w());
+	}
+	async sendPhoto(chatId: number): Promise<void> {
+		this.photos.push({ chatId });
+	}
+	async sendDocument(chatId: number): Promise<void> {
+		this.documents.push({ chatId });
+	}
+	async answerCallbackQuery(callbackQueryId: string): Promise<void> {
+		this.answeredCallbacks.push(callbackQueryId);
 	}
 	async sendChatAction(chatId: number, action = 'typing'): Promise<void> {
 		this.actions.push({ chatId, action });
@@ -215,6 +227,38 @@ describe('extractJob', () => {
 		expect(extractJob({ message: { chat: { id: 42 }, photo: [] } }, 42)).toBeNull();
 		expect(extractJob({ message: { chat: { id: 42 }, text: '   ' } }, 42)).toBeNull();
 	});
+
+	it('callback_query владельца → Job с callback-инфо', () => {
+		const update = {
+			callback_query: {
+				id: 'cbq-1',
+				from: { id: 42 },
+				data: 'paid:7',
+				message: { message_id: 100, chat: { id: 42 } },
+			},
+		};
+		expect(extractJob(update, 42)).toEqual({
+			chatId: 42,
+			text: 'paid:7',
+			callback: { id: 'cbq-1', data: 'paid:7', messageId: 100 },
+		});
+	});
+
+	it('callback_query чужого from.id → null (allow-list по инициатору)', () => {
+		const update = {
+			callback_query: { id: 'x', from: { id: 7 }, data: 'd', message: { chat: { id: 7 } } },
+		};
+		expect(extractJob(update, 42)).toBeNull();
+	});
+
+	it('callback_query без message (старое сообщение) → chatId = владелец', () => {
+		const update = { callback_query: { id: 'cbq-2', from: { id: 42 }, data: 'period' } };
+		expect(extractJob(update, 42)).toEqual({
+			chatId: 42,
+			text: 'period',
+			callback: { id: 'cbq-2', data: 'period', messageId: undefined },
+		});
+	});
 });
 
 describe('handleJob', () => {
@@ -258,6 +302,19 @@ describe('handleJob', () => {
 		const sent = engine.calls[0]?.prompt ?? '';
 		expect(sent).not.toContain(token);
 		expect(sent).toContain('[REDACTED:github_token]');
+	});
+
+	it('callback-джоба → answerCallbackQuery, движок НЕ зовётся ([ADR-0023])', async () => {
+		const { state, engine, telegram } = makeState();
+		await handleJob(state, {
+			chatId: 42,
+			text: 'paid:7',
+			callback: { id: 'cbq-1', data: 'paid:7', messageId: 100 },
+		});
+		expect(telegram.answeredCallbacks).toEqual(['cbq-1']);
+		// Транспорт-фундамент: фич-диспетчеризации ещё нет → движок не дёргаем.
+		expect(engine.calls).toHaveLength(0);
+		expect(telegram.sent).toHaveLength(0);
 	});
 });
 

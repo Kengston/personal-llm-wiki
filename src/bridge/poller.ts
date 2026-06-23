@@ -45,7 +45,14 @@ export async function runPoller(state: BridgeState, signal: AbortSignal): Promis
 	while (!signal.aborted) {
 		let updates: Array<Record<string, unknown>>;
 		try {
-			updates = await telegram.getUpdates(offset, pollTimeoutSec, ['message'], signal);
+			// message + callback_query (нажатия инлайн-кнопок, [ADR-0023]); extractJob
+			// маршрутизирует оба. allowed_updates — явный allow-list ТИПОВ апдейтов.
+			updates = await telegram.getUpdates(
+				offset,
+				pollTimeoutSec,
+				['message', 'callback_query'],
+				signal,
+			);
 		} catch (exc) {
 			if (signal.aborted) break; // shutdown оборвал висящий long-poll
 			log.warn({ err: String(exc) }, 'poller.get_updates_failed');
