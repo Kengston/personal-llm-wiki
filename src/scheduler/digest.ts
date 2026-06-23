@@ -11,6 +11,13 @@
  * (4) движок сам правит reminders (last_fired/due_at). Фильтр-аудит ([ADR-0011]
  * §8b/§11): читаем ТОЛЬКО ledger raw/.filter-log.jsonl + СЧИТАЕМ файлы в inbox —
  * НИКОГДА не открываем тела карантина/чор (P0-2, изоляция инъекций).
+ *
+ * ФИНАНС-СЕКЦИЯ ([ADR-0018] финмодуль, волна 2 C1):
+ *   buildFinanceSectionForDigest — собирает кредит-платежи и прогресс целей
+ *   из FinanceDueResult и встраивает их как ТЕКСТ в дайджест-промпт.
+ *   Ежедневный дайджест — текст (не спамим PNG картинками каждый день).
+ *   Недельный/месячный — PNG отправляются через отдельный канал (finance-sweep).
+ *   Секрет-гейт: только огрублённые данные в тексте (ADR-0011).
  */
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, relative } from 'node:path';
@@ -23,6 +30,10 @@ import { shouldSkipRawPath } from '../ingest/classifier.js';
 import { loadSchedulerConfig, type SchedulerConfig } from './config.js';
 import { collectDueItems, type DueItem } from './reminders.js';
 import { assertNoSecrets, EngineUnavailableError, pushToOwner, spawnEngine } from './runner.js';
+import {
+	buildFinanceDigestSection,
+	type FinanceDueResult,
+} from './finance-sweep.js';
 
 const log = childLogger('scheduler.digest');
 
@@ -212,11 +223,57 @@ export function collectFilterReview(
 	return section;
 }
 
+// --- Финанс-секция для дайджеста (ADR-0018, волна 2 C1) -------------------------
+
+/**
+ * buildFinanceSectionForDigest — форматирует финансовую секцию для вставки в дайджест.
+ *
+ * Принимает FinanceDueResult из finance-sweep и превращает его в текстовый блок
+ * для включения в sweep-промпт или прямой отправки. ТОЛЬКО ТЕКСТ — PNG для
+ * недельных/месячных сводок отправляются через отдельный канал deliverFinanceDue.
+ *
+ * Секрет-гейт: buildFinanceDigestSection уже применяет огрубление (ADR-0011).
+ *
+ * @param finDue — результат collectFinanceDue (может быть null если данных нет)
+ * @returns строка-секция (пустая если нечего показывать)
+ */
+export function buildFinanceSectionForDigest(finDue: FinanceDueResult | null): string {
+	if (!finDue) return '';
+
+	// Собираем ближайшие кредит-платежи для секции (только lead/due, не overdue).
+	const upcomingCredits = finDue.credits
+		.filter((c) => c.kind === 'lead' || c.kind === 'due')
+		.map((c) => ({
+			label: c.label,
+			dueDate: c.dueDate,
+			currency: c.currency,
+			// payoffDate пробрасываем из CreditDueItem — иначе buildFinanceDigestSection
+			// не отрендерит строку «погашение: YYYY-MM-DD» (поле опциональное в форматтере).
+			payoffDate: c.payoffDate,
+		}));
+
+	// Цели: огрублённый процент для текстового отображения.
+	const goalSummaries = finDue.milestones.map((m) => ({
+		label: m.label,
+		// Округляем процент до целого для читаемости.
+		pctRounded: Math.round(m.pct),
+	}));
+
+	return buildFinanceDigestSection({
+		upcomingCredits,
+		goalSummaries,
+		// hasNetworthData: в будущем можно получать из computeNetWorth,
+		// пока false (net-worth в отдельном sweep).
+		hasNetworthData: false,
+	});
+}
+
 function buildSweepPrompt(
 	cfg: SchedulerConfig,
 	items: DueItem[],
 	now: DateTime,
 	filterReview = '',
+	financeSection = '',
 ): string {
 	const nowStr = now.toFormat('yyyy-MM-dd HH:mm ZZZZ');
 	// С offset (HH:mmZZ → 2026-06-08T11:36+03:00): пример в промпте для last_fired/
@@ -224,13 +281,17 @@ function buildSweepPrompt(
 	const nowIso = now.toFormat("yyyy-MM-dd'T'HH:mmZZ");
 	const dateIso = now.toISODate() ?? '';
 	const review = filterReview || '_(нет новых событий фильтра)_';
+	// Финанс-секция включается если непустая (секрет-гейт: только огрублённые числа).
+	const financeBlock = financeSection
+		? `\n\nФИНАНСОВЫЙ ПУЛЬС (огрублённые данные, только для контекста — не пересчитывай):\n${financeSection}`
+		: '';
 	return `Ты — проактивный слой персональной LLM-wiki «Второй мозг». Сейчас ${nowStr}.
 
 Тебе передан УЖЕ ПОСЧИТАННЫЙ (детерминированно, кодом) список напоминаний,
 которые наступают сегодня или в ближайшие ${cfg.lookaheadDays} дн. Это факты —
 НЕ пересчитывай даты сам, опирайся на них:
 
-${renderDueList(items)}
+${renderDueList(items)}${financeBlock}
 
 ЗАДАЧА:
 1. Прочитай приватные файлы для контекста (у тебя доступ к репозиторию):
@@ -276,6 +337,14 @@ ${renderDueList(items)}
 export interface SweepOptions {
 	now?: DateTime;
 	dryRun?: boolean;
+	/**
+	 * finDue — результат collectFinanceDue из finance-sweep.
+	 *
+	 * Если задан, финансовая секция встраивается в sweep-промпт.
+	 * Если null или отсутствует — финансовая секция пропускается (тихо).
+	 * Это позволяет тестировать runSweep без реального леджера.
+	 */
+	finDue?: FinanceDueResult | null;
 }
 
 /** Выполнить один проактивный sweep. Возвращает exit-code (0=ок, 2/3/4=сбои). */
@@ -316,7 +385,16 @@ export async function runSweep(cfg: SchedulerConfig, opts: SweepOptions = {}): P
 		}
 	}
 
-	const prompt = buildSweepPrompt(cfg, items, now, filterSection);
+	// 1d. Финанс-секция: строим из опционального finDue (передаётся из main/cron-скрипта).
+	// finDue=null если finance-sweep отключён или stateDir недоступен.
+	// Тестируемость: runSweep не знает про леджер — caller строит finDue и передаёт.
+	const finDue = opts.finDue ?? null;
+	const financeSection = buildFinanceSectionForDigest(finDue);
+	if (financeSection) {
+		log.info({ chars: financeSection.length }, 'finance-section-added');
+	}
+
+	const prompt = buildSweepPrompt(cfg, items, now, filterSection, financeSection);
 
 	if (dryRun) {
 		process.stdout.write('=== DRY RUN: due-список ===\n' + renderDueList(items) + '\n');

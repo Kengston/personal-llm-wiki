@@ -26,9 +26,18 @@ import { join } from 'node:path';
 import { z } from 'zod';
 
 import { childLogger } from '../core/logger.js';
+import { chartSpec, type BalanceEntry, type CategoryEntry, type GoalProgressData } from '../ingest/finance/chart.js';
 import { assertPathAllowed, Ledger, resolvePublicRepo } from '../ingest/finance/ledger.js';
 import { recordFinanceEntry } from '../ingest/finance/record.js';
-import { FinanceGoalSchema, type FinanceGoal } from '../ingest/finance/types.js';
+import { FinanceGoalSchema, type FinanceGoal, CreditRecordSchema } from '../ingest/finance/types.js';
+import { renderChartPng } from './finance-render.js';
+import {
+	readPendingCashSurvey,
+	clearPendingCashSurvey,
+	writeLastInputTs,
+	type PendingCashSurvey,
+} from '../scheduler/finance-state.js';
+import type { TelegramClient } from './telegram.js';
 
 const log = childLogger('bridge.finance-intent');
 
@@ -115,6 +124,61 @@ const RecordExpenseIntentSchema = z.object({
 	ts: z.string().optional(),
 	/** goal_tag — ссылка на цель (опц.). */
 	goal_tag: z.string().optional(),
+});
+
+/**
+ * CreateCreditIntent — создание нового кредита (первый CreditRecord-снапшот в credits.jsonl).
+ *
+ * Движок получает данные о кредите от владельца и возвращает этот интент.
+ * dispatchFinanceIntent записывает первый снапшот кредита через Ledger.append('credits', ...),
+ * что делает кредит видимым для кредит-движка (creditPaymentsDue, splitPayment и т.д.).
+ *
+ * Пример: «Добавь ипотеку: 3 млн рублей, 14% годовых, ежемесячный платёж 35000, день платежа 15».
+ */
+const CreateCreditIntentSchema = z.object({
+	type: z.literal('create_credit'),
+	/**
+	 * credit_id — уникальный slug кредита без пробелов (напр. "mortgage-2026", "car-loan").
+	 * Используется как id в CreditRecord — повторные create_credit с тем же id дедупятся
+	 * (если кредит уже есть, возвращаем graceful без записи).
+	 */
+	credit_id: z.string().min(1).regex(/^[a-z0-9-]+$/, 'credit_id — slug без пробелов'),
+	/**
+	 * label — человекочитаемое название кредита (напр. "Ипотека ВТБ", "Кредит наличными").
+	 * Сохраняется в CreditRecord как source-комментарий; отображается в напоминаниях.
+	 */
+	label: z.string().min(1),
+	/** principal — первоначальная сумма кредита (> 0, в нативной валюте). */
+	principal: z.number().finite().positive(),
+	/** currency — нативная валюта кредита (ISO-4217 или крипто). */
+	currency: z.string().min(1).max(10),
+	/** rate_pct — годовая ставка в процентах (опц., напр. 21.5 → 21,5%). */
+	rate_pct: z.number().finite().nonnegative().optional(),
+	/** monthly_payment — ежемесячный платёж в нативной валюте (опц.). */
+	monthly_payment: z.number().finite().positive().optional(),
+	/**
+	 * next_payment_date — дата следующего платежа (ISO-8601, опц.).
+	 * Используется движком напоминаний: creditPaymentsDue вернёт этот платёж.
+	 * Если не задан, но задан payment_day — движок вычислит следующую дату сам.
+	 */
+	next_payment_date: z.string().optional(),
+	/**
+	 * payment_day — день месяца планового платежа (1–31, опц.).
+	 * Альтернатива next_payment_date для регулярных платежей без точной даты.
+	 */
+	payment_day: z.number().int().min(1).max(31).optional(),
+	/**
+	 * type — тип кредита: annuity (аннуитет) или differentiated (дифференцированный).
+	 * По умолчанию 'annuity' (самый распространённый в РФ).
+	 */
+	credit_type: z.enum(['annuity', 'differentiated']).default('annuity'),
+	/**
+	 * balance — текущий остаток долга (опц.; если не задан — равен principal).
+	 * Может отличаться от principal если кредит уже частично погашен.
+	 */
+	balance: z.number().finite().nonnegative().optional(),
+	/** ts — момент создания записи (ISO, опц.; если нет — берётся сейчас). */
+	ts: z.string().optional(),
 });
 
 /**
@@ -242,6 +306,7 @@ export const FinanceIntentSchema = z.discriminatedUnion('type', [
 	RecordIncomeIntentSchema,
 	RecordExpenseIntentSchema,
 	CreateGoalIntentSchema,
+	CreateCreditIntentSchema,
 	EditIntentSchema,
 	VoidIntentSchema,
 	TransferIntentSchema,
@@ -281,6 +346,17 @@ export interface DispatchResult {
 	 * null для остальных интентов.
 	 */
 	goalPage: { goalId: string; filePath: string } | null;
+	/**
+	 * chartPngSent — true если PNG-график был успешно отправлен через sendPhoto.
+	 * false если отправка пропущена (нет telegramClient/ownerChatId) или не уместна.
+	 * Используется тестами для проверки поведения реактивной визуализации (#6/#9).
+	 */
+	chartPngSent: boolean;
+	/**
+	 * pendingCashHandled — true если ответ был распознан как cash-снапшот из pending-опроса.
+	 * Используется тестами для проверки pending-cash flow (#11).
+	 */
+	pendingCashHandled: boolean;
 }
 
 /**
@@ -323,6 +399,26 @@ export interface FinanceIntentDeps {
 	 * По умолчанию берётся из Ledger.
 	 */
 	publicRepoRoot?: string;
+
+	/**
+	 * telegramClient — транспортный клиент для отправки графиков (sendPhoto) при
+	 * query-интентах. Инъектируется из бриджа; если не задан — только текстовый readback
+	 * (graceful: режим без Telegram, для тестов командной строки).
+	 */
+	telegramClient?: TelegramClient;
+
+	/**
+	 * ownerChatId — числовой id чата владельца (Telegram). Нужен для sendPhoto/sendDocument.
+	 * Если не задан и telegramClient есть — отправка пропускается (graceful).
+	 */
+	ownerChatId?: number;
+
+	/**
+	 * financeStateDir — каталог мутабельного состояния (finance-state.ts).
+	 * Нужен для readPendingCashSurvey / clearPendingCashSurvey.
+	 * В тестах: tmp-dir. Если не задан — pending-cash обработка пропускается (graceful).
+	 */
+	financeStateDir?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -398,8 +494,14 @@ export function extractFinanceIntent(engineAnswer: string): FinanceIntent | null
  * Query-интенты НИЧЕГО не пишут в леджер — только читают.
  * Возвращает структурный DispatchResult для форматирования.
  *
+ * Расширения (волна 2 кластер C3):
+ *   - При query-интентах уместного вида (net_worth/summary/spending/goal_progress/debt)
+ *     строит PNG-график через renderChartPng и отправляет через sendPhoto (если deps.telegramClient задан).
+ *   - При поступлении числового значения (record_cash) проверяет pending-cash survey
+ *     и гасит его через clearPendingCashSurvey.
+ *
  * @param intent — распарсенный FinanceIntent из extractFinanceIntent
- * @param deps   — зависимости (Ledger, nowFn, goalsDir)
+ * @param deps   — зависимости (Ledger, nowFn, goalsDir, telegramClient, ownerChatId, financeStateDir)
  */
 export async function dispatchFinanceIntent(
 	intent: FinanceIntent,
@@ -431,12 +533,19 @@ export async function dispatchFinanceIntent(
 				? `Записан баланс счёта «${intent.account.name}»: ${bal.balance} ${bal.currency}`
 				: `Записан баланс счёта «${intent.account.name}»`;
 
+			// Обновляем watermark idle-нуджа после успешного ввода (блокер #8).
+			if (deps.financeStateDir) {
+				writeLastInputTs(deps.financeStateDir, nowFn().toISOString());
+			}
+
 			return {
 				intent,
 				summary,
 				balances: result.balances,
 				queryContext: null,
 				goalPage: null,
+				chartPngSent: false,
+				pendingCashHandled: false,
 			};
 		}
 
@@ -463,12 +572,32 @@ export async function dispatchFinanceIntent(
 				? `Записаны наличные «${intent.account.name}»: ${bal.balance} ${bal.currency}`
 				: `Записаны наличные «${intent.account.name}»`;
 
+			// ── Pending-cash survey: если запись пришла в ответ на опрос, гасим маркер ──
+			// C1-проактив поставил маркер и спросил «сколько наличных?»; C3 (мы) проверяем
+			// маркер и гасим его после успешной записи (clearPendingCashSurvey).
+			let pendingCashHandled = false;
+			if (deps.financeStateDir) {
+				const pending = readPendingCashSurvey(deps.financeStateDir);
+				if (pending !== null) {
+					clearPendingCashSurvey(deps.financeStateDir);
+					pendingCashHandled = true;
+					log.info(
+						{ account: intent.account.name, currency: intent.account.currency },
+						'finance-intent: pending cash survey погашен после записи наличных',
+					);
+				}
+				// Обновляем watermark idle-нуджа после успешного ввода (блокер #8).
+				writeLastInputTs(deps.financeStateDir, nowFn().toISOString());
+			}
+
 			return {
 				intent,
 				summary,
 				balances: result.balances,
 				queryContext: null,
 				goalPage: null,
+				chartPngSent: false,
+				pendingCashHandled,
 			};
 		}
 
@@ -495,12 +624,19 @@ export async function dispatchFinanceIntent(
 
 			const summary = `Записан доход: +${intent.amount} ${intent.currency} на счёт «${intent.account.name}»${intent.category ? ` (${intent.category})` : ''}`;
 
+			// Обновляем watermark idle-нуджа после успешного ввода (блокер #8).
+			if (deps.financeStateDir) {
+				writeLastInputTs(deps.financeStateDir, nowFn().toISOString());
+			}
+
 			return {
 				intent,
 				summary,
 				balances: result.balances,
 				queryContext: null,
 				goalPage: null,
+				chartPngSent: false,
+				pendingCashHandled: false,
 			};
 		}
 
@@ -528,12 +664,19 @@ export async function dispatchFinanceIntent(
 
 			const summary = `Записан расход: -${intent.amount} ${intent.currency} со счёта «${intent.account.name}»${intent.category ? ` (${intent.category})` : ''}`;
 
+			// Обновляем watermark idle-нуджа после успешного ввода (блокер #8).
+			if (deps.financeStateDir) {
+				writeLastInputTs(deps.financeStateDir, nowFn().toISOString());
+			}
+
 			return {
 				intent,
 				summary,
 				balances: result.balances,
 				queryContext: null,
 				goalPage: null,
+				chartPngSent: false,
+				pendingCashHandled: false,
 			};
 		}
 
@@ -548,6 +691,8 @@ export async function dispatchFinanceIntent(
 				balances: [],
 				queryContext: null,
 				goalPage,
+				chartPngSent: false,
+				pendingCashHandled: false,
 			};
 		}
 
@@ -575,12 +720,19 @@ export async function dispatchFinanceIntent(
 
 			const summary = `Исправлена транзакция ${intent.amended_id.slice(0, 8)}…: ${intent.direction === 'in' ? '+' : '-'}${intent.amount} ${intent.currency}`;
 
+			// Обновляем watermark idle-нуджа после успешного ввода (блокер #8).
+			if (deps.financeStateDir) {
+				writeLastInputTs(deps.financeStateDir, nowFn().toISOString());
+			}
+
 			return {
 				intent,
 				summary,
 				balances: result.balances,
 				queryContext: null,
 				goalPage: null,
+				chartPngSent: false,
+				pendingCashHandled: false,
 			};
 		}
 
@@ -607,12 +759,19 @@ export async function dispatchFinanceIntent(
 
 			const summary = `Аннулирована транзакция ${intent.void_id.slice(0, 8)}…: сторно ${intent.amount} ${intent.currency}`;
 
+			// Обновляем watermark idle-нуджа после успешного ввода (блокер #8).
+			if (deps.financeStateDir) {
+				writeLastInputTs(deps.financeStateDir, nowFn().toISOString());
+			}
+
 			return {
 				intent,
 				summary,
 				balances: result.balances,
 				queryContext: null,
 				goalPage: null,
+				pendingCashHandled: false,
+				chartPngSent: false,
 			};
 		}
 
@@ -643,12 +802,99 @@ export async function dispatchFinanceIntent(
 
 			const summary = `Перевод: ${intent.amount} ${intent.currency} из «${intent.from_account.name}» → «${intent.to_account.name}»`;
 
+			// Обновляем watermark idle-нуджа после успешного ввода (блокер #8).
+			if (deps.financeStateDir) {
+				writeLastInputTs(deps.financeStateDir, nowFn().toISOString());
+			}
+
 			return {
 				intent,
 				summary,
 				balances: result.balances,
 				queryContext: null,
 				goalPage: null,
+				chartPngSent: false,
+				pendingCashHandled: false,
+			};
+		}
+
+		// ── Создание нового кредита (первый CreditRecord-снапшот) ─────────────
+		case 'create_credit': {
+			// Составляем текущий момент (используем ts из intent или nowFn).
+			const nowIso = intent.ts ?? nowFn().toISOString();
+
+			// Первоначальный баланс кредита: либо явно задан, либо равен principal.
+			const initialBalance = intent.balance ?? intent.principal;
+
+			// Строим CreditRecord для первого снапшота кредита.
+			// Поле source = 'manual' (ввод диалогом; ADR-0018 тир 4).
+			// Поле type в CreditRecord называется type — маппим из credit_type.
+			const creditRecord = {
+				id: intent.credit_id,
+				source: 'manual',
+				principal: intent.principal,
+				currency: intent.currency,
+				...(intent.rate_pct !== undefined ? { rate_pct: intent.rate_pct } : {}),
+				balance: initialBalance,
+				balance_ts: nowIso,
+				manual: true,
+				...(intent.monthly_payment !== undefined ? { monthly_payment: intent.monthly_payment } : {}),
+				...(intent.next_payment_date !== undefined ? { next_payment_date: intent.next_payment_date } : {}),
+				...(intent.payment_day !== undefined ? { payment_day: intent.payment_day } : {}),
+				...(intent.credit_type !== undefined ? { type: intent.credit_type } : {}),
+			};
+
+			// Валидируем перед записью через CreditRecordSchema (path-guard — в Ledger).
+			const validated = CreditRecordSchema.safeParse(creditRecord);
+			if (!validated.success) {
+				// Невалидная запись — логируем и не пишем (не роняем ход).
+				log.warn(
+					{ errors: validated.error.errors, credit_id: intent.credit_id },
+					'finance-intent: невалидный CreditRecord при create_credit',
+				);
+				const summary = `Ошибка создания кредита «${intent.credit_id}»: невалидные данные`;
+				return {
+					intent,
+					summary,
+					balances: [],
+					queryContext: null,
+					goalPage: null,
+					chartPngSent: false,
+					pendingCashHandled: false,
+				};
+			}
+
+			// Записываем первый снапшот кредита в credits.jsonl.
+			// Ledger.append применяет path-guard (запись только в приватный репо).
+			ledger.append('credits', validated.data);
+
+			log.info(
+				{ credit_id: intent.credit_id, balance: initialBalance, currency: intent.currency },
+				'finance-intent: создан новый кредит (первый снапшот записан в credits.jsonl)',
+			);
+
+			// Обновляем watermark idle-нуджа (ввод = активность).
+			if (deps.financeStateDir) {
+				writeLastInputTs(deps.financeStateDir, nowIso);
+			}
+
+			const creditSummary = [
+				`Создан кредит «${intent.label}» (${intent.credit_id})`,
+				`Сумма: ${intent.principal} ${intent.currency}`,
+				...(intent.rate_pct !== undefined ? [`Ставка: ${intent.rate_pct}% годовых`] : []),
+				...(intent.monthly_payment !== undefined ? [`Платёж: ${intent.monthly_payment} ${intent.currency}/мес`] : []),
+				...(intent.next_payment_date !== undefined ? [`Следующий платёж: ${intent.next_payment_date.slice(0, 10)}`] : []),
+				...(intent.payment_day !== undefined ? [`День платежа: ${intent.payment_day}`] : []),
+			].join('\n');
+
+			return {
+				intent,
+				summary: creditSummary,
+				balances: [],
+				queryContext: null,
+				goalPage: null,
+				chartPngSent: false,
+				pendingCashHandled: false,
 			};
 		}
 
@@ -657,12 +903,24 @@ export async function dispatchFinanceIntent(
 			const queryContext = await buildQueryContext(intent, ledger, nowFn);
 			const summary = formatQuerySummaryLine(intent);
 
+			// ── Реактивная доставка графика (#6/#9) ──────────────────────────────
+			// При уместных query-запросах строим PNG-график из агрегатов и отправляем
+			// через sendPhoto. «Уместность» определяется query_kind:
+			//   net_worth / summary → balances_snapshot (bar/pie счетов)
+			//   spending            → expense_by_category (pie категорий)
+			//   goal_progress       → goal_progress (progress-bar)
+			// Снапшот-графики доступны всегда (без оси времени, без FX).
+			// Query-режим НИЧЕГО не пишет в леджер — только читает.
+			const chartPngSent = await tryDeliverChart(intent, queryContext, deps);
+
 			return {
 				intent,
 				summary,
 				balances: [],
 				queryContext,
 				goalPage: null,
+				chartPngSent,
+				pendingCashHandled: false,
 			};
 		}
 
@@ -672,6 +930,203 @@ export async function dispatchFinanceIntent(
 			throw new Error(`dispatchFinanceIntent: неизвестный тип интента ${String((exhaustive as FinanceIntent).type)}`);
 		}
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Вспомогательная функция: pending-cash обработка входящего числа
+// ---------------------------------------------------------------------------
+
+/**
+ * tryHandlePendingCashAnswer — проверяет, является ли входящее сообщение ответом
+ * на pending cash survey (владелец отвечает числом на вопрос «сколько наличных?»).
+ *
+ * Используется точкой входа бриджа ДО попытки извлечь finance-intent из ответа движка:
+ * если financeStateDir задан и есть активный маркер, а текст сообщения — одно число,
+ * диспетчер сразу создаёт record_cash intent и запускает dispatch.
+ *
+ * Это позволяет C1 поставить маркер через writePendingCashSurvey, а C3 (этот файл)
+ * его «подхватить» без round-trip через LLM-движок.
+ *
+ * @param rawText — текст входящего сообщения от владельца
+ * @param financeStateDir — каталог состояния (finance-state.ts)
+ * @returns Распознанный PendingCashSurvey + число или null (не pending-ответ)
+ */
+export function tryParsePendingCashAnswer(
+	rawText: string,
+	financeStateDir: string,
+): { survey: PendingCashSurvey; amount: number } | null {
+	// Проверяем наличие активного маркера опроса.
+	const survey = readPendingCashSurvey(financeStateDir);
+	if (!survey) {
+		// Нет активного опроса — это обычное сообщение.
+		return null;
+	}
+
+	// Проверяем, что текст — одно конечное число (и ничего лишнего).
+	// Допускаем пробелы, запятые вместо точек (локали), знак + опционально.
+	const trimmed = rawText.trim().replace(/\s/g, '').replace(',', '.');
+	// Пустая строка после trim → не число (Number('') = 0 что было бы false-positive).
+	if (!trimmed) {
+		return null;
+	}
+	const parsed = Number(trimmed);
+	if (!Number.isFinite(parsed) || parsed < 0) {
+		// Текст не является корректным числом — это не cash-ответ.
+		return null;
+	}
+
+	return { survey, amount: parsed };
+}
+
+// ---------------------------------------------------------------------------
+// Реактивная доставка PNG-графика при query-интентах (#6/#9)
+// ---------------------------------------------------------------------------
+
+/**
+ * tryDeliverChart — строит уместный PNG-график и отправляет через sendPhoto.
+ *
+ * Вызывается только для query-интентов. Best-effort: ошибка отправки логируется,
+ * но не пробрасывается (текстовый readback дойдёт в любом случае).
+ *
+ * Secret-gate (ADR-0011): caption строится из огрублённых данных.
+ * Точные числа в caption не выносятся — только аппроксимация.
+ *
+ * @param intent      — QueryIntent (проверяем query_kind для выбора вида графика)
+ * @param context     — QueryContext с агрегатами из buildQueryContext
+ * @param deps        — зависимости (telegramClient, ownerChatId)
+ * @returns true если PNG успешно отправлен, false иначе
+ */
+async function tryDeliverChart(
+	intent: z.infer<typeof QueryIntentSchema>,
+	context: QueryContext,
+	deps: FinanceIntentDeps,
+): Promise<boolean> {
+	// Транспорт не задан или чат не известен — пропускаем (graceful, CLI/тест режим).
+	if (!deps.telegramClient || !deps.ownerChatId) {
+		return false;
+	}
+
+	const tg = deps.telegramClient;
+	const chatId = deps.ownerChatId;
+
+	try {
+		// Выбираем вид графика и строим данные по query_kind.
+		// Снапшот-графики (без оси времени) доступны всегда — без FX, без истории.
+		let pngBuffer: Buffer | null = null;
+		let caption = '';
+		let filename = 'chart.png';
+
+		switch (intent.query_kind) {
+			case 'net_worth':
+			case 'summary': {
+				// Балансы счетов по валютам → balances_snapshot (bar/pie).
+				// Строим BalanceEntry[] из QueryContext.balanceSummaries.
+				const entries: BalanceEntry[] = context.balanceSummaries.map((b) => ({
+					label: b.currency,
+					value: b.total,
+					currency: b.currency,
+				}));
+				if (entries.length > 0) {
+					const spec = chartSpec({ kind: 'balances_snapshot', entries });
+					pngBuffer = renderChartPng(spec);
+					// Caption: огрублённые суммы (secret-gate ADR-0011).
+					const capParts = context.balanceSummaries.map(
+						(b) => `~${roughenAmount(b.total)} ${b.currency}`,
+					);
+					caption = `Балансы: ${capParts.join(', ')}`;
+					filename = 'balances.png';
+				}
+				break;
+			}
+			case 'spending': {
+				// Расходы по категориям → expense_by_category (pie).
+				if (context.spendingByCategory.length > 0) {
+					// Определяем доминирующую валюту (первую по объёму).
+					const dominantCurrency = context.spendingByCategory[0]!.currency;
+					const entries: CategoryEntry[] = context.spendingByCategory.map((s) => ({
+						category: s.category,
+						amount: s.amount,
+						currency: s.currency,
+					}));
+					const spec = chartSpec({
+						kind: 'expense_by_category',
+						entries,
+						currency: dominantCurrency,
+					});
+					pngBuffer = renderChartPng(spec);
+					caption = `Расходы по категориям${intent.category ? ` (${intent.category})` : ''}`;
+					filename = 'spending.png';
+				}
+				break;
+			}
+			case 'goal_progress': {
+				// Прогресс цели → goal_progress (progress-bar).
+				// Используем данные из QueryContext.goalProgress.
+				const gp = context.goalProgress;
+				if (gp && gp.current > 0) {
+					const goalData: GoalProgressData = {
+						goal_id: gp.goal_id,
+						label: gp.goal_id,
+						current: gp.current,
+						// target=0 в контексте означает «данные о цели не прочитаны» —
+						// рендерим progress-placeholder, рендерер обработает gracefully.
+						target: gp.target,
+						currency: gp.currency === '?' ? 'RUB' : gp.currency,
+						fin_kind: 'save',
+					};
+					const spec = chartSpec({ kind: 'goal_progress', data: goalData });
+					pngBuffer = renderChartPng(spec);
+					caption = `Прогресс цели ${gp.goal_id}`;
+					filename = 'goal-progress.png';
+				}
+				break;
+			}
+			case 'feasibility':
+				// Для feasibility нет подходящего снапшот-графика — пропускаем.
+				break;
+		}
+
+		// PNG не построен (нет данных или неподходящий query_kind).
+		if (!pngBuffer) {
+			return false;
+		}
+
+		// Отправляем PNG через sendPhoto. Secret-gate уже применён в caption выше.
+		await tg.sendPhoto(
+			chatId,
+			{ data: pngBuffer, filename, contentType: 'image/png' },
+			{ caption },
+		);
+
+		log.info(
+			{ query_kind: intent.query_kind, filename, captionLen: caption.length },
+			'finance-intent: PNG-график отправлен через sendPhoto',
+		);
+		return true;
+	} catch (err) {
+		// Best-effort: ошибка отправки не роняет основной поток.
+		log.warn({ err: String(err), query_kind: intent.query_kind }, 'finance-intent: ошибка отправки PNG-графика');
+		return false;
+	}
+}
+
+/**
+ * roughenAmount — огрубляет числовую сумму до значимого порядка для caption/подписи.
+ * Secret-gate (ADR-0011): в видимый текст идут приближённые значения.
+ * Пример: 127456 → 130000; 1500 → 1500; 42.5 → 43.
+ *
+ * @param n — исходное число (может быть любым знаком)
+ * @returns огрублённое число (ближайший «красивый» порядок)
+ */
+function roughenAmount(n: number): number {
+	if (!Number.isFinite(n) || n === 0) return 0;
+	const abs = Math.abs(n);
+	const sign = n < 0 ? -1 : 1;
+	// Для небольших чисел (< 100) округляем до целых.
+	if (abs < 100) return sign * Math.round(abs);
+	// Для больших — до ближайшего порядка (1 значащая цифра).
+	const magnitude = Math.pow(10, Math.floor(Math.log10(abs)));
+	return sign * Math.round(abs / magnitude) * magnitude;
 }
 
 // ---------------------------------------------------------------------------

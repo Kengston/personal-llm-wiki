@@ -53,6 +53,41 @@ export interface Reminder {
 	intervalDays: number | null;
 	ease: number | null;
 	parseWarnings: string[];
+	/**
+	 * credit_id — опциональная привязка к кредиту (для credit-напоминаний).
+	 *
+	 * Конвенция: если задан, reminder является напоминанием о платеже
+	 * по кредиту с этим ID. finance-sweep использует это поле для корреляции.
+	 * Формат: строка-slug, совпадающая с CreditRecord.id.
+	 *
+	 * Пример в reminders.md:
+	 *   ---
+	 *   id: credit-remind-fake-001
+	 *   kind: recurring
+	 *   rrule: FREQ=MONTHLY;BYMONTHDAY=1
+	 *   credit_id: fake-credit-001
+	 *   status: pending
+	 *   ---
+	 */
+	credit_id?: string | null;
+	/**
+	 * survey_kind — тип проактивного опроса ('cash' | undefined).
+	 *
+	 * Конвенция: cash-survey записывается как recurring (~FREQ=DAILY;INTERVAL=3),
+	 * с survey_kind: cash. finance-sweep (C1) создаёт этот reminder при первом запуске.
+	 * Реактив (C3) гасит pending-маркер при получении ответа.
+	 *
+	 * Пример в reminders.md:
+	 *   ---
+	 *   id: cash-survey-recurring
+	 *   kind: recurring
+	 *   rrule: FREQ=DAILY;INTERVAL=3
+	 *   survey_kind: cash
+	 *   status: pending
+	 *   created: 2026-06-01T00:00:00+03:00
+	 *   ---
+	 */
+	survey_kind?: string | null;
 }
 
 /** pending/snoozed — живые; done — выключен. */
@@ -232,6 +267,11 @@ function parseBlock(blockText: string, defaultZone?: string): Reminder | null {
 		intervalDays: intOf('interval_days'),
 		ease: floatOf('ease'),
 		parseWarnings: warnings,
+		// Опциональные поля финансового модуля (аддитивно, не ломают существующие блоки):
+		// credit_id — привязка кредит-напоминания к CreditRecord.id.
+		credit_id: fields['credit_id'] || null,
+		// survey_kind — тип проактивного опроса ('cash' или отсутствует).
+		survey_kind: fields['survey_kind'] || null,
 	};
 }
 

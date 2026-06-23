@@ -21,6 +21,7 @@
 		"test": "vitest run"
 	},
 	"dependencies": {
+		"@resvg/resvg-js": "^2.6.2",
 		"dotenv-flow": "^4.1.0",
 		"fastify": "^4.28.1",
 		"js-yaml": "^4.1.0",

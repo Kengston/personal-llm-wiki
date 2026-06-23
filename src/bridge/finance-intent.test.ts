@@ -17,20 +17,30 @@
  *   5. formatReadback: детерминированный текст по структурному результату.
  *   6. Флоу owner→Engine(mock)→dispatch→readback на 4 примерах.
  *   7. buildFinanceContextSummary: корректная сводка из снапшотов/транзакций.
+ *   8. [Новое] Реактивная доставка PNG: query с уместным запросом → sendPhoto вызван.
+ *   9. [Новое] Query ничего не пишет + sendPhoto не нужен без telegramClient.
+ *  10. [Новое] Pending-cash flow: ответ числом + активный маркер → record_cash + clearPendingCashSurvey.
+ *  11. [Новое] tryParsePendingCashAnswer: правильно парсит/игнорирует входящие числа.
  */
 
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { Ledger } from '../ingest/finance/ledger.js';
 import { recordFinanceEntry } from '../ingest/finance/record.js';
+import {
+	writePendingCashSurvey,
+	readPendingCashSurvey,
+} from '../scheduler/finance-state.js';
+import type { TelegramClient, InputFile, SendMediaOptions } from './telegram.js';
 import {
 	buildFinanceContextSummary,
 	dispatchFinanceIntent,
 	extractFinanceIntent,
 	formatReadback,
+	tryParsePendingCashAnswer,
 	type FinanceIntent,
 	type FinanceIntentDeps,
 } from './finance-intent.js';
@@ -973,5 +983,713 @@ describe('createGoalPage — path-guard публичного репо', () => {
 			rmSync(fakePublicRoot, { recursive: true, force: true });
 			rmSync(goalsOk, { recursive: true, force: true });
 		}
+	});
+});
+
+// ---------------------------------------------------------------------------
+// 9. Реактивная доставка PNG-графика (sendPhoto) при query-интентах
+// ---------------------------------------------------------------------------
+
+/**
+ * Создаёт мок TelegramClient для тестов реактивной доставки.
+ * Записывает все вызовы sendPhoto/sendDocument в массивы для проверки.
+ */
+function makeMockTelegramClient() {
+	const sentPhotos: Array<{ chatId: number; photo: InputFile; opts?: SendMediaOptions }> = [];
+	const sentDocuments: Array<{ chatId: number; doc: InputFile; opts?: SendMediaOptions }> = [];
+	const sentMessages: Array<{ chatId: number; text: string }> = [];
+
+	const mock: TelegramClient = {
+		sendMessage: vi.fn(async (chatId: number, text: string) => {
+			sentMessages.push({ chatId, text });
+		}),
+		sendPhoto: vi.fn(async (chatId: number, photo: InputFile, opts?: SendMediaOptions) => {
+			sentPhotos.push({ chatId, photo, opts });
+		}),
+		sendDocument: vi.fn(async (chatId: number, doc: InputFile, opts?: SendMediaOptions) => {
+			sentDocuments.push({ chatId, doc, opts });
+		}),
+		answerCallbackQuery: vi.fn(async () => {}),
+		sendChatAction: vi.fn(async () => {}),
+		getMe: vi.fn(async () => ({})),
+		getUpdates: vi.fn(async () => []),
+		deleteWebhook: vi.fn(async () => {}),
+		aclose: vi.fn(async () => {}),
+	};
+
+	return { mock, sentPhotos, sentDocuments, sentMessages };
+}
+
+/** Магия PNG: первые 4 байта файла. */
+const PNG_MAGIC = [0x89, 0x50, 0x4e, 0x47];
+
+/** Проверяет что data — валидный PNG-буфер (магия + непустой). */
+function expectValidPngData(data: Buffer | Uint8Array | undefined): void {
+	expect(data).toBeDefined();
+	const buf = Buffer.isBuffer(data) ? data : Buffer.from(data!);
+	expect(buf.length).toBeGreaterThan(PNG_MAGIC.length);
+	for (let i = 0; i < PNG_MAGIC.length; i++) {
+		expect(buf[i]).toBe(PNG_MAGIC[i]);
+	}
+}
+
+describe('dispatchFinanceIntent — реактивная доставка PNG (sendPhoto)', () => {
+	let dir: string;
+	let ledger: Ledger;
+
+	beforeEach(() => {
+		const tmp = makeTmpLedger();
+		dir = tmp.dir;
+		ledger = tmp.ledger;
+	});
+
+	afterEach(() => {
+		rmSync(dir, { recursive: true, force: true });
+	});
+
+	it('query net_worth со снапшотами + telegramClient → sendPhoto вызван с непустым PNG', async () => {
+		// Предварительно записываем снапшоты в нескольких валютах.
+		recordFinanceEntry(
+			{
+				kind: 'snapshot',
+				account: { source: 'manual', name: 'Fake RUB Account', currency: 'RUB', kind: 'checking' },
+				balance: 80000,
+			},
+			{ ledger, nowFn: fakeNowFn },
+		);
+		recordFinanceEntry(
+			{
+				kind: 'snapshot',
+				account: { source: 'manual', name: 'Fake USDT Account', currency: 'USDT', kind: 'exchange' },
+				balance: 300,
+			},
+			{ ledger, nowFn: fakeNowFn },
+		);
+
+		const { mock, sentPhotos } = makeMockTelegramClient();
+
+		const intent: FinanceIntent = { type: 'query', query_kind: 'net_worth' };
+		const result = await dispatchFinanceIntent(intent, {
+			ledger,
+			nowFn: fakeNowFn,
+			telegramClient: mock,
+			ownerChatId: 42,
+		});
+
+		// Результат: chartPngSent = true, query не пишет.
+		expect(result.chartPngSent).toBe(true);
+		expect(result.queryContext).not.toBeNull();
+
+		// sendPhoto должен быть вызван ровно один раз.
+		expect(sentPhotos).toHaveLength(1);
+		expect(sentPhotos[0]!.chatId).toBe(42);
+
+		// Проверяем что payload — непустой валидный PNG.
+		expectValidPngData(sentPhotos[0]!.photo.data);
+
+		// Имя файла — осмысленное.
+		expect(sentPhotos[0]!.photo.filename).toBe('balances.png');
+
+		// Caption — без точных чисел (secret-gate: только огрублённые).
+		expect(sentPhotos[0]!.opts?.caption).toBeTruthy();
+		expect(typeof sentPhotos[0]!.opts?.caption).toBe('string');
+
+		// Леджер не изменился (query read-only).
+		expect(ledger.readAll('snapshots')).toHaveLength(2);
+		expect(ledger.readAll('transactions')).toHaveLength(0);
+	});
+
+	it('query spending + траты → sendPhoto с pie расходов', async () => {
+		const account = {
+			source: 'manual',
+			name: 'Fake Spend Account',
+			currency: 'RUB',
+			kind: 'checking' as const,
+		};
+
+		// Добавляем снапшот и несколько расходов.
+		recordFinanceEntry(
+			{ kind: 'snapshot', account, balance: 50000 },
+			{ ledger, nowFn: fakeNowFn },
+		);
+		recordFinanceEntry(
+			{
+				kind: 'transaction',
+				account,
+				amount: 2000,
+				currency: 'RUB',
+				direction: 'out',
+				category: 'grocery',
+				ts: '2026-06-01T10:00:00Z',
+			},
+			{ ledger, nowFn: fakeNowFn },
+		);
+		recordFinanceEntry(
+			{
+				kind: 'transaction',
+				account,
+				amount: 800,
+				currency: 'RUB',
+				direction: 'out',
+				category: 'transport',
+				ts: '2026-06-05T10:00:00Z',
+			},
+			{ ledger, nowFn: fakeNowFn },
+		);
+
+		const { mock, sentPhotos } = makeMockTelegramClient();
+
+		const intent: FinanceIntent = {
+			type: 'query',
+			query_kind: 'spending',
+			period_start: '2026-06-01T00:00:00Z',
+			period_end: '2026-07-01T00:00:00Z',
+		};
+
+		const result = await dispatchFinanceIntent(intent, {
+			ledger,
+			nowFn: fakeNowFn,
+			telegramClient: mock,
+			ownerChatId: 99,
+		});
+
+		expect(result.chartPngSent).toBe(true);
+		expect(sentPhotos).toHaveLength(1);
+		// PNG из расходов — называется spending.png.
+		expect(sentPhotos[0]!.photo.filename).toBe('spending.png');
+		expectValidPngData(sentPhotos[0]!.photo.data);
+	});
+
+	it('query net_worth БЕЗ telegramClient → chartPngSent=false, sendPhoto НЕ вызван', async () => {
+		// Записываем снапшот.
+		recordFinanceEntry(
+			{
+				kind: 'snapshot',
+				account: { source: 'manual', name: 'Fake NW', currency: 'RUB', kind: 'checking' },
+				balance: 60000,
+			},
+			{ ledger, nowFn: fakeNowFn },
+		);
+
+		// telegramClient НЕ передаём — ожидаем graceful skip.
+		const intent: FinanceIntent = { type: 'query', query_kind: 'net_worth' };
+		const result = await dispatchFinanceIntent(intent, { ledger, nowFn: fakeNowFn });
+
+		expect(result.chartPngSent).toBe(false);
+		// queryContext всё равно заполнен (читаем данные всегда).
+		expect(result.queryContext).not.toBeNull();
+		expect(result.queryContext!.balanceSummaries).toHaveLength(1);
+	});
+
+	it('query net_worth с пустым леджером → chartPngSent=false (нет данных для PNG)', async () => {
+		const { mock } = makeMockTelegramClient();
+
+		const intent: FinanceIntent = { type: 'query', query_kind: 'net_worth' };
+		const result = await dispatchFinanceIntent(intent, {
+			ledger,
+			nowFn: fakeNowFn,
+			telegramClient: mock,
+			ownerChatId: 1,
+		});
+
+		// Пустой леджер — нет данных для балансов → PNG не строится.
+		expect(result.chartPngSent).toBe(false);
+		// sendPhoto НЕ вызван.
+		expect(mock.sendPhoto).not.toHaveBeenCalled();
+	});
+
+	it('query feasibility → chartPngSent=false (нет уместного графика)', async () => {
+		// feasibility не имеет подходящего снапшот-графика — проверяем что не падаем.
+		recordFinanceEntry(
+			{
+				kind: 'snapshot',
+				account: { source: 'manual', name: 'Fake Feasib', currency: 'RUB', kind: 'checking' },
+				balance: 100000,
+			},
+			{ ledger, nowFn: fakeNowFn },
+		);
+
+		const { mock } = makeMockTelegramClient();
+
+		const intent: FinanceIntent = {
+			type: 'query',
+			query_kind: 'feasibility',
+			amount: 50000,
+			currency: 'RUB',
+		};
+
+		const result = await dispatchFinanceIntent(intent, {
+			ledger,
+			nowFn: fakeNowFn,
+			telegramClient: mock,
+			ownerChatId: 1,
+		});
+
+		// feasibility — нет PNG.
+		expect(result.chartPngSent).toBe(false);
+		expect(mock.sendPhoto).not.toHaveBeenCalled();
+		// queryContext с discretionaryInfo по-прежнему работает.
+		expect(result.queryContext!.discretionaryInfo).toContain('хватает');
+	});
+
+	it('record_expense → chartPngSent=false (запись, не query)', async () => {
+		// Для record-интентов PNG не отправляется — только для query.
+		const { mock } = makeMockTelegramClient();
+
+		const intent: FinanceIntent = {
+			type: 'record_expense',
+			account: { source: 'manual', name: 'Fake Exp', currency: 'RUB', kind: 'checking' },
+			amount: 500,
+			currency: 'RUB',
+			category: 'transport',
+		};
+
+		const result = await dispatchFinanceIntent(intent, {
+			ledger,
+			nowFn: fakeNowFn,
+			telegramClient: mock,
+			ownerChatId: 1,
+		});
+
+		expect(result.chartPngSent).toBe(false);
+		expect(mock.sendPhoto).not.toHaveBeenCalled();
+		// Транзакция записана.
+		expect(ledger.readAll('transactions')).toHaveLength(1);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// 10. Pending-cash flow: ответ числом → record_cash + clearPendingCashSurvey
+// ---------------------------------------------------------------------------
+
+describe('dispatchFinanceIntent — pending-cash survey flow', () => {
+	let dir: string;
+	let ledger: Ledger;
+	let stateDir: string;
+
+	beforeEach(() => {
+		const tmp = makeTmpLedger();
+		dir = tmp.dir;
+		ledger = tmp.ledger;
+		// Отдельный tmp-каталог для finance-state (pending cash survey).
+		stateDir = mkdtempSync(join(tmpdir(), 'finance-state-test-'));
+	});
+
+	afterEach(() => {
+		rmSync(dir, { recursive: true, force: true });
+		rmSync(stateDir, { recursive: true, force: true });
+	});
+
+	it('record_cash + активный pending маркер → pendingCashHandled=true + маркер удалён', async () => {
+		// C1 ставит маркер (имитируем что проактив спросил «сколько наличных?»).
+		writePendingCashSurvey(stateDir, {
+			account: 'Fake Cash Wallet',
+			currency: 'RUB',
+			sinceIso: '2026-06-23T09:00:00Z',
+		});
+
+		// Проверяем что маркер стоит.
+		expect(readPendingCashSurvey(stateDir)).not.toBeNull();
+
+		// Пользователь отвечает числом — C3 диспетчеризует как record_cash.
+		const intent: FinanceIntent = {
+			type: 'record_cash',
+			account: { source: 'manual', name: 'Fake Cash Wallet', currency: 'RUB', kind: 'cash' },
+			balance: 3000,
+		};
+
+		const deps: FinanceIntentDeps = {
+			ledger,
+			nowFn: fakeNowFn,
+			financeStateDir: stateDir,
+		};
+
+		const result = await dispatchFinanceIntent(intent, deps);
+
+		// Запись произошла.
+		const snapshots = ledger.readAll('snapshots');
+		expect(snapshots).toHaveLength(1);
+		expect(snapshots[0]!.balance).toBe(3000);
+
+		// Pending маркер погашен.
+		expect(result.pendingCashHandled).toBe(true);
+		expect(readPendingCashSurvey(stateDir)).toBeNull();
+	});
+
+	it('record_cash БЕЗ активного pending маркера → pendingCashHandled=false', async () => {
+		// Маркер НЕ установлен.
+		expect(readPendingCashSurvey(stateDir)).toBeNull();
+
+		const intent: FinanceIntent = {
+			type: 'record_cash',
+			account: { source: 'manual', name: 'Fake Cash No Pending', currency: 'USD', kind: 'cash' },
+			balance: 100,
+		};
+
+		const result = await dispatchFinanceIntent(intent, {
+			ledger,
+			nowFn: fakeNowFn,
+			financeStateDir: stateDir,
+		});
+
+		// Запись произошла, но pending не было.
+		expect(ledger.readAll('snapshots')).toHaveLength(1);
+		expect(result.pendingCashHandled).toBe(false);
+	});
+
+	it('record_cash без financeStateDir → pendingCashHandled=false (graceful)', async () => {
+		// financeStateDir не передан — graceful skip, без ошибок.
+		const intent: FinanceIntent = {
+			type: 'record_cash',
+			account: { source: 'manual', name: 'Fake Cash No State', currency: 'RUB', kind: 'cash' },
+			balance: 500,
+		};
+
+		const result = await dispatchFinanceIntent(intent, {
+			ledger,
+			nowFn: fakeNowFn,
+			// financeStateDir намеренно не передан.
+		});
+
+		// Всё работает, pendingCashHandled=false (нет stateDir).
+		expect(result.pendingCashHandled).toBe(false);
+		expect(ledger.readAll('snapshots')).toHaveLength(1);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// 11. tryParsePendingCashAnswer — парсинг числового ответа на pending опрос
+// ---------------------------------------------------------------------------
+
+describe('tryParsePendingCashAnswer', () => {
+	let stateDir: string;
+
+	beforeEach(() => {
+		stateDir = mkdtempSync(join(tmpdir(), 'finance-pending-parse-test-'));
+	});
+
+	afterEach(() => {
+		rmSync(stateDir, { recursive: true, force: true });
+	});
+
+	it('нет активного маркера → null (не pending-ответ)', () => {
+		const result = tryParsePendingCashAnswer('1500', stateDir);
+		expect(result).toBeNull();
+	});
+
+	it('есть маркер + целое число → { survey, amount }', () => {
+		writePendingCashSurvey(stateDir, {
+			account: 'Fake Cash',
+			currency: 'RUB',
+			sinceIso: '2026-06-23T10:00:00Z',
+		});
+
+		const result = tryParsePendingCashAnswer('4500', stateDir);
+		expect(result).not.toBeNull();
+		expect(result!.amount).toBe(4500);
+		expect(result!.survey.currency).toBe('RUB');
+	});
+
+	it('есть маркер + дробное число с запятой → корректный amount', () => {
+		writePendingCashSurvey(stateDir, {
+			currency: 'USD',
+			sinceIso: '2026-06-23T10:00:00Z',
+		});
+
+		const result = tryParsePendingCashAnswer('42,50', stateDir);
+		expect(result).not.toBeNull();
+		expect(result!.amount).toBeCloseTo(42.5);
+	});
+
+	it('есть маркер + текст (не число) → null', () => {
+		writePendingCashSurvey(stateDir, {
+			sinceIso: '2026-06-23T10:00:00Z',
+		});
+
+		const result = tryParsePendingCashAnswer('не помню точно', stateDir);
+		expect(result).toBeNull();
+	});
+
+	it('есть маркер + пустая строка → null', () => {
+		writePendingCashSurvey(stateDir, {
+			sinceIso: '2026-06-23T10:00:00Z',
+		});
+
+		expect(tryParsePendingCashAnswer('', stateDir)).toBeNull();
+		expect(tryParsePendingCashAnswer('   ', stateDir)).toBeNull();
+	});
+
+	it('есть маркер + отрицательное число → null (баланс не может быть отрицательным)', () => {
+		writePendingCashSurvey(stateDir, {
+			sinceIso: '2026-06-23T10:00:00Z',
+		});
+
+		// Отрицательный баланс наличных не имеет смысла.
+		const result = tryParsePendingCashAnswer('-500', stateDir);
+		expect(result).toBeNull();
+	});
+
+	it('есть маркер + ноль → корректно (нуль наличных возможен)', () => {
+		writePendingCashSurvey(stateDir, {
+			sinceIso: '2026-06-23T10:00:00Z',
+		});
+
+		const result = tryParsePendingCashAnswer('0', stateDir);
+		expect(result).not.toBeNull();
+		expect(result!.amount).toBe(0);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// 12. create_credit — первый CreditRecord-снапшот пишется в credits.jsonl (блокер #4)
+// ---------------------------------------------------------------------------
+
+describe('dispatchFinanceIntent — create_credit (блокер #4)', () => {
+	let dir: string;
+	let ledger: Ledger;
+	let stateDir: string;
+
+	beforeEach(() => {
+		const tmp = makeTmpLedger();
+		dir = tmp.dir;
+		ledger = tmp.ledger;
+		stateDir = mkdtempSync(join(tmpdir(), 'credit-state-test-'));
+	});
+
+	afterEach(() => {
+		rmSync(dir, { recursive: true, force: true });
+		rmSync(stateDir, { recursive: true, force: true });
+	});
+
+	it('create_credit → пишет первый CreditRecord в credits.jsonl', async () => {
+		// Синтетический кредит (все данные фейковые).
+		const intent: FinanceIntent = {
+			type: 'create_credit',
+			credit_id: 'fake-mortgage-2026',
+			label: 'Синтетическая ипотека',
+			principal: 3000000,
+			currency: 'RUB',
+			rate_pct: 14.0,
+			monthly_payment: 35000,
+			payment_day: 15,
+			credit_type: 'annuity',
+		};
+
+		const result = await dispatchFinanceIntent(intent, {
+			ledger,
+			nowFn: fakeNowFn,
+			financeStateDir: stateDir,
+		});
+
+		// Проверяем что запись появилась в credits.jsonl.
+		const credits = ledger.readAll('credits');
+		expect(credits).toHaveLength(1);
+		expect(credits[0]!.id).toBe('fake-mortgage-2026');
+		expect(credits[0]!.principal).toBe(3000000);
+		expect(credits[0]!.currency).toBe('RUB');
+		expect(credits[0]!.rate_pct).toBe(14.0);
+		expect(credits[0]!.monthly_payment).toBe(35000);
+		expect(credits[0]!.payment_day).toBe(15);
+		// balance по умолчанию = principal (не задан balance явно).
+		expect(credits[0]!.balance).toBe(3000000);
+		expect(credits[0]!.manual).toBe(true);
+
+		// summary содержит ключевые данные.
+		expect(result.summary).toContain('fake-mortgage-2026');
+		expect(result.summary).toContain('3000000 RUB');
+		expect(result.summary).toContain('14% годовых');
+		expect(result.summary).toContain('35000 RUB/мес');
+		expect(result.summary).toContain('День платежа: 15');
+
+		// balances пустой (credit-запись — не snapshot-счёт).
+		expect(result.balances).toHaveLength(0);
+		// goalPage и queryContext — null (не применимы).
+		expect(result.goalPage).toBeNull();
+		expect(result.queryContext).toBeNull();
+	});
+
+	it('create_credit с явным balance (частично погашен) → balance в снапшоте', async () => {
+		const intent: FinanceIntent = {
+			type: 'create_credit',
+			credit_id: 'fake-car-loan',
+			label: 'Синтетический автокредит',
+			principal: 800000,
+			currency: 'RUB',
+			balance: 600000, // уже погашено 200k
+			next_payment_date: '2026-07-05T00:00:00Z',
+			credit_type: 'differentiated',
+		};
+
+		await dispatchFinanceIntent(intent, { ledger, nowFn: fakeNowFn });
+
+		const credits = ledger.readAll('credits');
+		expect(credits).toHaveLength(1);
+		// balance явно задан (600000), не principal.
+		expect(credits[0]!.balance).toBe(600000);
+		expect(credits[0]!.principal).toBe(800000);
+		expect(credits[0]!.next_payment_date).toBe('2026-07-05T00:00:00Z');
+	});
+
+	it('create_credit обновляет idle watermark (writeLastInputTs)', async () => {
+		const { readLastInputTs } = await import('../scheduler/finance-state.js');
+
+		// Watermark изначально пустой.
+		expect(readLastInputTs(stateDir)).toBeNull();
+
+		const intent: FinanceIntent = {
+			type: 'create_credit',
+			credit_id: 'fake-idle-credit',
+			label: 'Тест idle watermark',
+			principal: 100000,
+			currency: 'RUB',
+			credit_type: 'annuity',
+		};
+
+		await dispatchFinanceIntent(intent, {
+			ledger,
+			nowFn: fakeNowFn,
+			financeStateDir: stateDir,
+		});
+
+		// Watermark должен обновиться (writeLastInputTs вызван в create_credit).
+		const ts = readLastInputTs(stateDir);
+		expect(ts).not.toBeNull();
+		// Проверяем что это строка с датой (ISO-формат).
+		expect(ts).toContain('2026-06-23');
+	});
+
+	it('extractFinanceIntent: create_credit без обязательных полей → null (zod отклоняет)', () => {
+		// Невалидный JSON: нет credit_id/principal/currency → zod-валидация провалится.
+		const badJson = JSON.stringify({ type: 'create_credit' });
+		const answer = `\`\`\`finance-intent\n${badJson}\n\`\`\``;
+		const extracted = extractFinanceIntent(answer);
+		// zod-валидация не прошла (нет credit_id/principal/currency) → null.
+		expect(extracted).toBeNull();
+	});
+});
+
+// ---------------------------------------------------------------------------
+// 13. writeLastInputTs после record* (блокер #8 idle watermark)
+// ---------------------------------------------------------------------------
+
+describe('dispatchFinanceIntent — idle watermark writeLastInputTs (блокер #8)', () => {
+	let dir: string;
+	let ledger: Ledger;
+	let stateDir: string;
+
+	beforeEach(() => {
+		const tmp = makeTmpLedger();
+		dir = tmp.dir;
+		ledger = tmp.ledger;
+		stateDir = mkdtempSync(join(tmpdir(), 'idle-watermark-test-'));
+	});
+
+	afterEach(() => {
+		rmSync(dir, { recursive: true, force: true });
+		rmSync(stateDir, { recursive: true, force: true });
+	});
+
+	it('record_income + financeStateDir → watermark обновляется', async () => {
+		const { readLastInputTs } = await import('../scheduler/finance-state.js');
+		expect(readLastInputTs(stateDir)).toBeNull();
+
+		const intent: FinanceIntent = {
+			type: 'record_income',
+			account: { source: 'manual', name: 'Fake Income', currency: 'RUB', kind: 'checking' },
+			amount: 50000,
+			currency: 'RUB',
+			category: 'salary',
+		};
+
+		await dispatchFinanceIntent(intent, {
+			ledger,
+			nowFn: fakeNowFn,
+			financeStateDir: stateDir,
+		});
+
+		// Watermark обновлён.
+		const ts = readLastInputTs(stateDir);
+		expect(ts).not.toBeNull();
+		expect(ts).toContain('2026-06-23');
+	});
+
+	it('record_expense + financeStateDir → watermark обновляется', async () => {
+		const { readLastInputTs } = await import('../scheduler/finance-state.js');
+
+		const intent: FinanceIntent = {
+			type: 'record_expense',
+			account: { source: 'manual', name: 'Fake Expense', currency: 'RUB', kind: 'checking' },
+			amount: 1000,
+			currency: 'RUB',
+			category: 'grocery',
+		};
+
+		await dispatchFinanceIntent(intent, {
+			ledger,
+			nowFn: fakeNowFn,
+			financeStateDir: stateDir,
+		});
+
+		expect(readLastInputTs(stateDir)).not.toBeNull();
+	});
+
+	it('record_balance + financeStateDir → watermark обновляется', async () => {
+		const { readLastInputTs } = await import('../scheduler/finance-state.js');
+
+		const intent: FinanceIntent = {
+			type: 'record_balance',
+			account: { source: 'manual', name: 'Fake Balance', currency: 'USD', kind: 'bank' },
+			balance: 2500,
+		};
+
+		await dispatchFinanceIntent(intent, {
+			ledger,
+			nowFn: fakeNowFn,
+			financeStateDir: stateDir,
+		});
+
+		expect(readLastInputTs(stateDir)).not.toBeNull();
+	});
+
+	it('query → watermark НЕ обновляется (query read-only)', async () => {
+		const { readLastInputTs } = await import('../scheduler/finance-state.js');
+		expect(readLastInputTs(stateDir)).toBeNull();
+
+		// Предзаполняем снапшот чтобы query имел данные.
+		recordFinanceEntry(
+			{
+				kind: 'snapshot',
+				account: { source: 'manual', name: 'Fake Q', currency: 'RUB', kind: 'checking' },
+				balance: 10000,
+			},
+			{ ledger, nowFn: fakeNowFn },
+		);
+
+		const intent: FinanceIntent = { type: 'query', query_kind: 'net_worth' };
+		await dispatchFinanceIntent(intent, {
+			ledger,
+			nowFn: fakeNowFn,
+			financeStateDir: stateDir,
+		});
+
+		// query не пишет — watermark по-прежнему null.
+		expect(readLastInputTs(stateDir)).toBeNull();
+	});
+
+	it('record_income без financeStateDir → graceful (не бросает)', async () => {
+		// financeStateDir не передан — записи нет, но исключений тоже.
+		const intent: FinanceIntent = {
+			type: 'record_income',
+			account: { source: 'manual', name: 'Fake Income No State', currency: 'RUB', kind: 'checking' },
+			amount: 20000,
+			currency: 'RUB',
+		};
+
+		await expect(
+			dispatchFinanceIntent(intent, { ledger, nowFn: fakeNowFn }),
+		).resolves.not.toThrow();
+
+		// Транзакция всё равно записана.
+		expect(ledger.readAll('transactions')).toHaveLength(1);
 	});
 });

@@ -316,9 +316,56 @@ describe('handleJob', () => {
 			callback: { id: 'cbq-1', data: 'paid:7', messageId: 100 },
 		});
 		expect(telegram.answeredCallbacks).toEqual(['cbq-1']);
-		// Транспорт-фундамент: фич-диспетчеризации ещё нет → движок не дёргаем.
+		// Транспорт-фундамент: не-финансовые callback'и (нет CALLBACK_PREFIX=fin:) → движок не дёргаем.
 		expect(engine.calls).toHaveLength(0);
 		expect(telegram.sent).toHaveLength(0);
+	});
+
+	it('финанс-callback (fin:paid:) с financeLedger → диспетчеризуется, движок НЕ зовётся', async () => {
+		// Создаём tmp-каталог для леджера.
+		const ledgerDir = mkdtempSync(join(tmpdir(), 'app-fcb-test-'));
+		try {
+			const financeLedger = new Ledger({
+				financeDir: ledgerDir,
+				publicRepoRoot: join(tmpdir(), 'fake-public-for-fcb-test'),
+			});
+
+			const settings: Settings = {
+				botToken: 'token',
+				ownerChatId: 42,
+				mode: 'webhook',
+				webhookSecret: SECRET,
+				pollTimeoutSec: 50,
+				dbPath: ':memory:',
+				maxQueue: 2,
+				workers: 1,
+				port: 0,
+			};
+			const engine = new FakeEngine();
+			const tg = new FakeTelegram();
+			const store = new SessionStore(settings.dbPath);
+			openStores.push(store);
+
+			// BridgeState с financeLedger — финансовый диспетчер активен.
+			const state = new BridgeState(settings, engine, store, tg, undefined, undefined, undefined, financeLedger);
+
+			// Нажимаем [Оплачено] по несуществующему кредиту:
+			// диспетчер запустится, не найдёт кредит, отправит сообщение об ошибке.
+			await handleJob(state, {
+				chatId: 42,
+				text: 'fin:paid:nonexistent-credit',
+				callback: { id: 'cbq-fin-1', data: 'fin:paid:nonexistent-credit', messageId: 200 },
+			});
+
+			// Движок НЕ вызывался (callback_query → не текстовый ход).
+			expect(engine.calls).toHaveLength(0);
+			// answerCallbackQuery вызван диспетчером.
+			expect(tg.answeredCallbacks).toContain('cbq-fin-1');
+			// Telegram получил сообщение от диспетчера (ошибка «не найден» или readback).
+			expect(tg.sent.length).toBeGreaterThan(0);
+		} finally {
+			rmSync(ledgerDir, { recursive: true, force: true });
+		}
 	});
 });
 
