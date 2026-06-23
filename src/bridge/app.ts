@@ -18,8 +18,14 @@ import Fastify, { type FastifyInstance } from 'fastify';
 
 import { childLogger } from '../core/logger.js';
 import { failClosedSanitize, SanitizerError } from '../ingest/sanitizer.js';
+import { Ledger } from '../ingest/finance/ledger.js';
 import type { Settings } from './config.js';
 import { type Engine, EngineError, type EngineResult } from './engine.js';
+import {
+	dispatchFinanceIntent,
+	extractFinanceIntent,
+	formatReadback,
+} from './finance-intent.js';
 import { AsyncQueue, Mutex, QueueFull } from './queue.js';
 import {
 	findSession,
@@ -84,6 +90,17 @@ export class BridgeState {
 		// под cwd конкретного проекта (без персоны вики) для `/resume`.
 		readonly sessions?: SessionsConfig,
 		readonly resumeEngineFor?: (projectPath: string) => Engine,
+		/**
+		 * financeLedger — экземпляр Ledger для финансового диспетчера (ADR-0024).
+		 * Опционально: если не задан, finance-intent диспетчеризация не производится.
+		 * Создаётся в main.ts при наличии FINANCE_RAW_DIR / CONTENT_ROOT в окружении.
+		 */
+		readonly financeLedger?: Ledger,
+		/**
+		 * financeGoalsDir — каталог для страниц finance-goal (wiki/finance/goals/).
+		 * Опционально: если не задан, create_goal не пишет страницы (только логирует).
+		 */
+		readonly financeGoalsDir?: string,
 	) {
 		this.queue = new AsyncQueue<Job>(settings.maxQueue);
 	}
@@ -274,6 +291,34 @@ export async function handleJob(state: BridgeState, job: Job): Promise<void> {
 			}
 		}
 		if (res.sessionId) state.store.upsertSession(job.chatId, res.sessionId);
+
+		// ADR-0024 (finance-intent): если движок эмитил finance-intent блок —
+		// детерминированно диспетчеризуем в чистые функции (record/query/goal).
+		// Readback формируется детерминированно (без LLM). При ошибке диспетчера
+		// — логируем и пропускаем (ответ движка отдаётся как есть, не ронять ход).
+		if (state.financeLedger) {
+			const intent = extractFinanceIntent(res.answer);
+			if (intent) {
+				try {
+					const dispatchResult = await dispatchFinanceIntent(intent, {
+						ledger: state.financeLedger,
+						goalsDir: state.financeGoalsDir,
+					});
+					// Детерминированный readback заменяет ответ движка (или дополняет его).
+					// Используем readback как основной текст: он содержит актуальные балансы.
+					const readback = formatReadback(dispatchResult);
+					// Сохраняем session_id из оригинального ответа; заменяем только answer.
+					res = { ...res, answer: readback };
+					log.info(
+						{ intentType: intent.type, readbackChars: readback.length },
+						'finance-intent.dispatched',
+					);
+				} catch (err) {
+					// Ошибка диспетчера — безопасно: движок уже ответил, отдаём как есть.
+					log.warn({ err: String(err), intentType: intent.type }, 'finance-intent.dispatch_failed');
+				}
+			}
+		}
 
 		// ADR-0015 R1: движок мог дописать вику (capture) → коммитит ДОВЕРЕННЫЙ мост (НЕ
 		// LLM-инструмент), если дерево «грязное». Query-ход дерево не меняет → коммита нет.

@@ -3,8 +3,12 @@
  * extractJob, обработка job'а (engine→store→telegram, /reset, фейл движка),
  * backpressure, /health. Реальный SessionStore на ':memory:'.
  */
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
+import { Ledger } from '../ingest/finance/ledger.js';
 import type { Settings } from './config.js';
 import { BridgeState, buildApp, extractJob, handleJob, startWorkers, stopBridge } from './app.js';
 import { type Engine, EngineError, type EngineResult } from './engine.js';
@@ -315,6 +319,92 @@ describe('handleJob', () => {
 		// Транспорт-фундамент: фич-диспетчеризации ещё нет → движок не дёргаем.
 		expect(engine.calls).toHaveLength(0);
 		expect(telegram.sent).toHaveLength(0);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// handleJob — реактивный финансовый шов (ADR-0024)
+// ---------------------------------------------------------------------------
+
+describe('handleJob — finance-intent диспетчер (ADR-0024)', () => {
+	/**
+	 * Создаёт BridgeState с инъектированным Ledger в tmp-каталоге.
+	 * Engine мокируется и возвращает finance-intent блок в ответе.
+	 * Проверяем что readback (детерминированный) заменил answer движка.
+	 */
+	it('движок эмитит finance-intent → readback заменяет answer, снапшот записан', async () => {
+		// Создаём tmp-каталог для леджера (path-guard с фейковым публичным репо).
+		const ledgerDir = mkdtempSync(join(tmpdir(), 'app-finance-test-'));
+		try {
+			const financeLedger = new Ledger({
+				financeDir: ledgerDir,
+				// Заведомо другой путь → path-guard позволит запись в ledgerDir.
+				publicRepoRoot: join(tmpdir(), 'fake-public-for-app-test'),
+			});
+
+			// Engine возвращает ответ с finance-intent блоком.
+			const fakeFinanceAnswer =
+				'Записал баланс!\n' +
+				'```finance-intent\n' +
+				'{"type":"record_balance","account":{"source":"manual","name":"Fake App Account","currency":"RUB","kind":"checking"},"balance":99000}\n' +
+				'```\n' +
+				'Готово!';
+
+			const settings: Settings = {
+				botToken: 'token',
+				ownerChatId: 42,
+				mode: 'webhook',
+				webhookSecret: SECRET,
+				pollTimeoutSec: 50,
+				dbPath: ':memory:',
+				maxQueue: 2,
+				workers: 1,
+				port: 0,
+			};
+			const engine: Engine = {
+				async run(_prompt: string, _sessionId: string | null): Promise<EngineResult> {
+					return { answer: fakeFinanceAnswer, sessionId: 'sess-finance', usage: null, isError: false };
+				},
+			};
+			const telegram = new FakeTelegram();
+			const store = new SessionStore(settings.dbPath);
+			openStores.push(store);
+
+			// BridgeState с financeLedger — теперь шов активен.
+			const state = new BridgeState(settings, engine, store, telegram, undefined, undefined, undefined, financeLedger);
+
+			await handleJob(state, { chatId: 42, text: 'баланс сбера 99000 рублей' });
+
+			// Снапшот записан в леджер (шов реально отработал).
+			const snapshots = financeLedger.readAll('snapshots');
+			expect(snapshots).toHaveLength(1);
+			expect(snapshots[0]!.balance).toBe(99000);
+			expect(snapshots[0]!.currency).toBe('RUB');
+
+			// Telegram получил readback (детерминированный), а НЕ сырой ответ движка.
+			const lastSent = telegram.sent.at(-1);
+			expect(lastSent?.text).not.toContain('```finance-intent');
+			expect(lastSent?.text).toContain('99000 RUB');
+			expect(lastSent?.text).toContain('Fake App Account');
+		} finally {
+			rmSync(ledgerDir, { recursive: true, force: true });
+		}
+	});
+
+	it('financeLedger undefined → finance-intent блок НЕ диспетчеризуется (шов выключен)', async () => {
+		// makeState() не передаёт financeLedger → шов отключён.
+		const { state, engine, telegram } = makeState();
+		// Двигку возвращаем finance-intent — но шов выключен, должен прийти сырой ответ.
+		engine.result = {
+			answer: '```finance-intent\n{"type":"record_balance","account":{"source":"manual","name":"X","currency":"RUB","kind":"checking"},"balance":1}\n```',
+			sessionId: 'sess-x',
+			usage: null,
+			isError: false,
+		};
+		await handleJob(state, { chatId: 42, text: 'проверка' });
+		// Сырой ответ передан без изменений (fenced-блок остался).
+		const lastSent = telegram.sent.at(-1);
+		expect(lastSent?.text).toContain('```finance-intent');
 	});
 });
 

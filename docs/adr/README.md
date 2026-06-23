@@ -43,6 +43,7 @@ last_updated: 2026-06-10
 | [0021](0021-growth-target-date-scanned-into-reminders.md) | Дедлайны growth-страниц (`target_date`) сканируются в дайджест по образцу `birthdaysFromWiki` (единый источник даты цели). Уточняет [0007](0007-engine-spawn-and-scheduler.md). | accepted |
 | [0022](0022-knowledge-package-ingest-frontmatter-normalization.md) | Ингест knowledge-package нормализует frontmatter под контракт хранителя (sources/claims/status object-форма; `confidence` опц. для knowledge-claims; мирроринг + идемпотентность по версии). Уточняет [0019](0019-knowledge-library-external-methodology.md). | accepted |
 | [0023](0023-telegram-transport-media-and-callbacks.md) | Транспорт Telegram расширен под фин-модуль: `sendPhoto`/`sendDocument` (multipart), инлайн-кнопки (`reply_markup` + `callback_query`, owner-gate по `from.id`), opt-in `parse_mode`; исходящий guard на caption/filename, не на бинаре. Уточняет [0004](0004-telegram-bridge-reactive-proactive.md)/[0014](0014-telegram-transport-long-polling.md). | accepted |
+| [0024](0024-finance-reactive-dispatch.md) | Финансовый реактивный диспетчер: движок эмитит `finance-intent` JSON-блок, бридж детерминированно диспетчеризует в чистые функции (`recordFinanceEntry`/`computeNetWorth`/etc.); readback детерминирован; query через пред-счёт финансового контекста. Расширяет [0018](0018-finance-module.md)/[0015](0015-capture-write-path-permission-posture.md)/[0016](0016-bot-persona-configurable-system-prompt.md). | accepted |
 
 ## Сквозные темы
 
