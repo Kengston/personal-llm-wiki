@@ -12,11 +12,13 @@ import dotenvFlow from 'dotenv-flow';
 dotenvFlow.config({ silent: true });
 
 import { childLogger } from '../core/logger.js';
+import { Ledger, resolveFinanceDir } from '../ingest/finance/ledger.js';
 import { buildApp, BridgeState, startWorkers, stopBridge } from './app.js';
 import { loadSettings } from './config.js';
 import { buildEngineFromEnv } from './engine.js';
+import { buildFinanceContextSummary } from './finance-intent.js';
 import { runPoller } from './poller.js';
-import { loadPersona } from './prompt.js';
+import { appendFinanceInstruction, loadPersona } from './prompt.js';
 import { loadSessionsConfig } from './sessions.js';
 import { SessionStore } from './store.js';
 import { BotApiTelegramClient } from './telegram.js';
@@ -38,14 +40,54 @@ async function main(): Promise<void> {
 	const resumeEngineFor = (projectPath: string) =>
 		buildEngineFromEnv(process.env, { repoPath: projectPath });
 
+	// Финансовый леджер (ADR-0024): создаём из окружения если задан FINANCE_RAW_DIR,
+	// RAW_DIR или CONTENT_ROOT (resolveFinanceDir). Если переменных нет — используем
+	// дефолтный ~/llm-wiki-content/raw/finance (Ledger создаётся, но каталог не трогается
+	// до первой записи). Опционально: при ошибке инициализации (неправильные пути) мост
+	// стартует без финансового шва (financeLedger = undefined → блок в app.ts не активен).
+	let financeLedger: Ledger | undefined;
+	let financeGoalsDir: string | undefined;
+	try {
+		financeLedger = new Ledger({ env: process.env });
+		// goals-каталог: wiki/finance/goals/ в приватном репо (WIKI_REPO_PATH) или CONTENT_ROOT.
+		const contentRoot =
+			(process.env.CONTENT_ROOT ?? '').trim() ||
+			(wikiRepo ? wikiRepo : undefined);
+		if (contentRoot) {
+			financeGoalsDir = join(contentRoot, 'wiki', 'finance', 'goals');
+		}
+		log.info(
+			{ financeDir: resolveFinanceDir(process.env), financeGoalsDir },
+			'finance.ledger_ready',
+		);
+	} catch (err) {
+		// Нестандартный сетап или ошибка резолвинга — мост стартует без финансового шва.
+		log.warn({ err: String(err) }, 'finance.ledger_init_failed — finance-intent отключён');
+		financeLedger = undefined;
+	}
+
+	// Персона с финансовой инструкцией (ADR-0024): если леджер доступен — добавляем
+	// finance-intent протокол и снапшот финансового контекста (балансы, net-worth)
+	// на момент старта. Контекст статичный на старт процесса — приемлемо для single-user
+	// single-session моста (ходы сериализованы, следующий старт подтянет свежий контекст).
+	const basePersona = loadPersona(personaFile);
+	const financeContext = financeLedger
+		? buildFinanceContextSummary(financeLedger)
+		: null;
+	const systemPrompt = financeLedger
+		? appendFinanceInstruction(basePersona, financeContext)
+		: basePersona;
+
 	const state = new BridgeState(
 		settings,
-		buildEngineFromEnv(process.env, { systemPrompt: loadPersona(personaFile) }),
+		buildEngineFromEnv(process.env, { systemPrompt }),
 		new SessionStore(settings.dbPath),
 		new BotApiTelegramClient(settings.botToken),
 		wikiRepo,
 		sessionsCfg,
 		resumeEngineFor,
+		financeLedger,
+		financeGoalsDir,
 	);
 	if (sessionsCfg.enabled) {
 		log.info(

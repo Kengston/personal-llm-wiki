@@ -30,6 +30,12 @@
  *   transactions.jsonl  — транзакции (TransactionRecord)
  *   credits.jsonl       — кредиты (CreditRecord)
  *   fx_rates.jsonl      — курсы валют (FxRateRecord)
+ *   budgets.jsonl       — бюджеты по категориям (BudgetRecord)
+ *   categories.jsonl    — справочник категорий (CategoryRecord)
+ *   templates.jsonl     — шаблоны повторяющихся операций (TemplateRecord)
+ *   receivables.jsonl   — долги мне (ReceivableRecord)
+ *   payables.jsonl      — мои долги (PayableRecord)
+ *   settings.jsonl      — настройки модуля (SettingsRecord)
  */
 
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
@@ -38,16 +44,28 @@ import { join, resolve } from 'node:path';
 
 import {
 	AccountRecordSchema,
+	BudgetRecordSchema,
+	CategoryRecordSchema,
 	CreditRecordSchema,
 	FxRateRecordSchema,
 	LEDGER_FILES,
+	PayableRecordSchema,
+	ReceivableRecordSchema,
+	SettingsRecordSchema,
 	SnapshotRecordSchema,
+	TemplateRecordSchema,
 	TransactionRecordSchema,
 	type AccountRecord,
+	type BudgetRecord,
+	type CategoryRecord,
 	type CreditRecord,
 	type FxRateRecord,
 	type LedgerFileKey,
+	type PayableRecord,
+	type ReceivableRecord,
+	type SettingsRecord,
 	type SnapshotRecord,
+	type TemplateRecord,
 	type TransactionRecord,
 } from './types.js';
 
@@ -165,6 +183,9 @@ export function resolvePublicRepo(env: NodeJS.ProcessEnv = process.env): string 
 
 /**
  * Zod-схемы по ключу файла леджера — для универсального appendRecord().
+ *
+ * При добавлении нового типа: (1) добавить схему сюда, (2) добавить тип в
+ * RecordTypeMap ниже. Остальной код Ledger (append/readAll) подхватит автоматически.
  */
 const SCHEMAS = {
 	accounts: AccountRecordSchema,
@@ -172,10 +193,18 @@ const SCHEMAS = {
 	transactions: TransactionRecordSchema,
 	credits: CreditRecordSchema,
 	fx_rates: FxRateRecordSchema,
+	// Новые файлы (E4) — аддитивно
+	budgets: BudgetRecordSchema,
+	categories: CategoryRecordSchema,
+	templates: TemplateRecordSchema,
+	receivables: ReceivableRecordSchema,
+	payables: PayableRecordSchema,
+	settings: SettingsRecordSchema,
 } as const;
 
 /**
- * Типы записей по ключу файла — для корректных сигнатур appendAccount и т.д.
+ * Типы записей по ключу файла — для корректных сигнатур append/readAll.
+ * Должен быть синхронен с LEDGER_FILES в types.ts и SCHEMAS выше.
  */
 type RecordTypeMap = {
 	accounts: AccountRecord;
@@ -183,6 +212,13 @@ type RecordTypeMap = {
 	transactions: TransactionRecord;
 	credits: CreditRecord;
 	fx_rates: FxRateRecord;
+	// Новые типы (E4)
+	budgets: BudgetRecord;
+	categories: CategoryRecord;
+	templates: TemplateRecord;
+	receivables: ReceivableRecord;
+	payables: PayableRecord;
+	settings: SettingsRecord;
 };
 
 /**
