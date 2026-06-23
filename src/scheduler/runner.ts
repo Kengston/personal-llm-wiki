@@ -64,13 +64,23 @@ function resolveOwnerChatId(env: NodeJS.ProcessEnv): number {
 /** Owner-only push в Telegram (единственный исходящий канал проактива). */
 export async function pushToOwner(
 	text: string,
-	opts: { disableNotification?: boolean; env?: NodeJS.ProcessEnv } = {},
+	opts: {
+		disableNotification?: boolean;
+		env?: NodeJS.ProcessEnv;
+		/**
+		 * replyMarkup — инлайн-клавиатура для сообщения (ADR-0023).
+		 * Передаётся в sendMessage.replyMarkup без изменений.
+		 * Используется кредит-напоминаниями (#7): [Оплачено]/[Отложить]/[Подробнее].
+		 */
+		replyMarkup?: import('../bridge/telegram.js').ReplyMarkup;
+	} = {},
 ): Promise<void> {
 	const env = opts.env ?? process.env;
 	const ownerChatId = resolveOwnerChatId(env);
 	const client = new BotApiTelegramClient((env.TELEGRAM_BOT_TOKEN ?? '').trim());
 	await client.sendMessage(ownerChatId, text, {
 		disableNotification: opts.disableNotification ?? false,
+		...(opts.replyMarkup !== undefined ? { replyMarkup: opts.replyMarkup } : {}),
 	});
 }
 

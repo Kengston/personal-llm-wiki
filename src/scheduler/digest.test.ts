@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { SchedulerConfig } from './config.js';
 import {
+	buildFinanceSectionForDigest,
 	collectFilterReview,
 	countPendingChores,
 	readFilterEvents,
@@ -18,6 +19,7 @@ import {
 	renderFilterReview,
 	runSweep,
 } from './digest.js';
+import type { FinanceDueResult } from './finance-sweep.js';
 import { assertNoSecrets } from './runner.js';
 
 const NOW = DateTime.fromISO('2026-06-08T10:00:00+03:00', { setZone: true });
@@ -247,6 +249,150 @@ describe('runSweep — exit-коды без реального движка', ()
 			expect(await runSweep(cfg, { now: NOW })).toBe(2);
 		} finally {
 			if (saved !== undefined) process.env.WIKI_REPO_PATH = saved;
+		}
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Финанс-секция для дайджеста (buildFinanceSectionForDigest) — ADR-0018 волна 2
+// ---------------------------------------------------------------------------
+
+describe('buildFinanceSectionForDigest', () => {
+	it('null → пустая строка (финансовый свип не запускался)', () => {
+		expect(buildFinanceSectionForDigest(null)).toBe('');
+	});
+
+	it('пустой FinanceDueResult → пустая строка (нет данных для показа)', () => {
+		const emptyResult: FinanceDueResult = {
+			credits: [],
+			milestones: [],
+			cashSurvey: { isDue: false, fireKey: 'cash-survey:2026-06-08' },
+			idleNudge: { isDue: false, idleDays: 0, fireKey: 'idle-nudge:2026-06-08' },
+		};
+		expect(buildFinanceSectionForDigest(emptyResult)).toBe('');
+	});
+
+	it('с кредит-айтемами lead/due: секция содержит заголовок и дату', () => {
+		const result: FinanceDueResult = {
+			credits: [{
+				kind: 'lead',
+				credit_id: 'fake-credit-001',
+				label: 'Синтетический кредит',
+				amount: 51000,
+				currency: 'RUB',
+				dueDate: '2026-06-26T00:00:00Z',
+				balanceAfter: 449000,
+				account: undefined,
+				fireKey: 'credit:fake-credit-001:2026-06-26:lead',
+				payoffDate: '2028-06-01',
+			}],
+			milestones: [],
+			cashSurvey: { isDue: false, fireKey: 'cash-survey:2026-06-08' },
+			idleNudge: { isDue: false, idleDays: 0, fireKey: 'idle-nudge:2026-06-08' },
+		};
+
+		const section = buildFinanceSectionForDigest(result);
+		expect(section).toContain('Финансовый пульс');
+		expect(section).toContain('Кредиты');
+		expect(section).toContain('Синтетический кредит');
+		expect(section).toContain('2026-06-26');
+		// Фиксируем проводку payoffDate → дайджест-текст (R4 ADR-0026 §крит.6).
+		// Ранее .map() не передавал c.payoffDate → «погашение» исчезало из секции.
+		expect(section).toContain('погашение');
+		expect(section).toContain('2028-06-01');
+	});
+
+	it('с майлстоун-айтемом: секция содержит прогресс цели в процентах', () => {
+		const result: FinanceDueResult = {
+			credits: [],
+			milestones: [{
+				goal_id: 'fake-goal-emergency',
+				label: 'Экстренный фонд',
+				milestonePercent: 75,
+				pct: 75.3,
+				current: 150000,
+				target: 200000,
+				currency: 'RUB',
+				fin_kind: 'save',
+				fireKey: 'goal:fake-goal-emergency:milestone:75',
+			}],
+			cashSurvey: { isDue: false, fireKey: 'cash-survey:2026-06-08' },
+			idleNudge: { isDue: false, idleDays: 0, fireKey: 'idle-nudge:2026-06-08' },
+		};
+
+		const section = buildFinanceSectionForDigest(result);
+		expect(section).toContain('Цели');
+		expect(section).toContain('Экстренный фонд');
+		expect(section).toContain('75%');
+	});
+
+	it('overdue-кредиты НЕ включаются в секцию (отдельный срочный пуш)', () => {
+		const result: FinanceDueResult = {
+			credits: [{
+				kind: 'overdue',
+				credit_id: 'fake-overdue',
+				label: 'Просроченный кредит',
+				amount: 20000,
+				currency: 'RUB',
+				dueDate: '2026-06-10T00:00:00Z',
+				balanceAfter: 100000,
+				account: undefined,
+				fireKey: 'credit:fake-overdue:2026-06-08:overdue',
+				payoffDate: '2027-06-01',
+			}],
+			milestones: [],
+			cashSurvey: { isDue: false, fireKey: 'cash-survey:2026-06-08' },
+			idleNudge: { isDue: false, idleDays: 0, fireKey: 'idle-nudge:2026-06-08' },
+		};
+
+		// overdue-айтемы отдельным срочным пушем, не в дайджест-секцию.
+		expect(buildFinanceSectionForDigest(result)).toBe('');
+	});
+
+	it('runSweep с finDue — финанс-блок встраивается в промпт (dry-run)', async () => {
+		let dir: string = '';
+		try {
+			dir = mkdtempSync(join(tmpdir(), 'digest-finance-test-'));
+			const cfg = makeCfg(dir);
+			const finDue: FinanceDueResult = {
+				credits: [{
+					kind: 'lead',
+					credit_id: 'fake-credit-dryrun',
+					label: 'Кредит для dry-run',
+					amount: 51000,
+					currency: 'RUB',
+					dueDate: '2026-06-26T00:00:00Z',
+					balanceAfter: 449000,
+					account: undefined,
+					fireKey: 'credit:fake-credit-dryrun:2026-06-26:lead',
+					payoffDate: '2028-06-01',
+				}],
+				milestones: [],
+				cashSurvey: { isDue: false, fireKey: 'cash-survey:2026-06-08' },
+				idleNudge: { isDue: false, idleDays: 0, fireKey: 'idle-nudge:2026-06-08' },
+			};
+
+			// Пишем due-напоминание чтобы sweep не отсеялся на шаге «нечего due».
+			writeFileSync(
+				cfg.remindersPath,
+				['---', 'id: t', 'due_at: 2026-06-08T10:02:00+03:00', 'status: pending'].join('\n'),
+				'utf8',
+			);
+
+			// dry-run пишет промпт в stdout — проверяем что финанс-блок там есть.
+			const written: string[] = [];
+			const spy = vi.spyOn(process.stdout, 'write').mockImplementation((s) => {
+				written.push(String(s));
+				return true;
+			});
+
+			await runSweep(cfg, { now: NOW, dryRun: true, finDue });
+			spy.mockRestore();
+
+			const combined = written.join('');
+			expect(combined).toContain('ФИНАНСОВЫЙ ПУЛЬС');
+		} finally {
+			if (dir) rmSync(dir, { recursive: true, force: true });
 		}
 	});
 });
