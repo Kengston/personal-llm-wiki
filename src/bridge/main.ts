@@ -13,6 +13,7 @@ dotenvFlow.config({ silent: true });
 
 import { childLogger } from '../core/logger.js';
 import { Ledger, resolveFinanceDir } from '../ingest/finance/ledger.js';
+import { resolveFinanceStateDir } from '../scheduler/finance-state.js';
 import { buildApp, BridgeState, startWorkers, stopBridge } from './app.js';
 import { loadSettings } from './config.js';
 import { buildEngineFromEnv } from './engine.js';
@@ -47,6 +48,11 @@ async function main(): Promise<void> {
 	// стартует без финансового шва (financeLedger = undefined → блок в app.ts не активен).
 	let financeLedger: Ledger | undefined;
 	let financeGoalsDir: string | undefined;
+	// financeStateDir — каталог мутабельного состояния финпроактива (.finance-state/):
+	// pending-cash-survey (ответ числом на опрос налички) и last-input watermark
+	// (idle-нудж). Без него оба механизма #8 молча пропускаются — поэтому ОБЯЗАТЕЛЬНО
+	// пробрасываем его в BridgeState (иначе app.ts получит undefined, как было до фикса).
+	let financeStateDir: string | undefined;
 	try {
 		financeLedger = new Ledger({ env: process.env });
 		// goals-каталог: wiki/finance/goals/ в приватном репо (WIKI_REPO_PATH) или CONTENT_ROOT.
@@ -56,8 +62,10 @@ async function main(): Promise<void> {
 		if (contentRoot) {
 			financeGoalsDir = join(contentRoot, 'wiki', 'finance', 'goals');
 		}
+		// Состояние проактива резолвится из окружения (CONTENT_ROOT/.finance-state по умолчанию).
+		financeStateDir = resolveFinanceStateDir(process.env);
 		log.info(
-			{ financeDir: resolveFinanceDir(process.env), financeGoalsDir },
+			{ financeDir: resolveFinanceDir(process.env), financeGoalsDir, financeStateDir },
 			'finance.ledger_ready',
 		);
 	} catch (err) {
@@ -88,6 +96,7 @@ async function main(): Promise<void> {
 		resumeEngineFor,
 		financeLedger,
 		financeGoalsDir,
+		financeStateDir,
 	);
 	if (sessionsCfg.enabled) {
 		log.info(
