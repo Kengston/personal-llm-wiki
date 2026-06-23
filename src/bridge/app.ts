@@ -26,6 +26,10 @@ import {
 	extractFinanceIntent,
 	formatReadback,
 } from './finance-intent.js';
+import {
+	CALLBACK_PREFIX,
+	dispatchFinanceCallback,
+} from './finance-callbacks.js';
 import { AsyncQueue, Mutex, QueueFull } from './queue.js';
 import {
 	findSession,
@@ -101,6 +105,13 @@ export class BridgeState {
 		 * Опционально: если не задан, create_goal не пишет страницы (только логирует).
 		 */
 		readonly financeGoalsDir?: string,
+		/**
+		 * financeStateDir — каталог мутабельного состояния финансового проактива
+		 * (.finance-state/ в приватном репо). Нужен для pending-cash-survey и
+		 * last-input watermark. Опционально: если не задан, оба механизма пропускаются
+		 * (graceful). Создаётся в main.ts через resolveFinanceStateDir().
+		 */
+		readonly financeStateDir?: string,
 	) {
 		this.queue = new AsyncQueue<Job>(settings.maxQueue);
 	}
@@ -303,6 +314,9 @@ export async function handleJob(state: BridgeState, job: Job): Promise<void> {
 					const dispatchResult = await dispatchFinanceIntent(intent, {
 						ledger: state.financeLedger,
 						goalsDir: state.financeGoalsDir,
+						// financeStateDir — для pending-cash-survey и idle-nudge watermark (блокер #8).
+						// Если не задан — оба механизма пропускаются gracefully.
+						financeStateDir: state.financeStateDir,
 					});
 					// Детерминированный readback заменяет ответ движка (или дополняет его).
 					// Используем readback как основной текст: он содержит актуальные балансы.
@@ -345,23 +359,47 @@ export async function handleJob(state: BridgeState, job: Job): Promise<void> {
 // --------------------------------------------------------------------------- //
 
 /**
- * Обработать нажатие инлайн-кнопки. Сейчас это ФУНДАМЕНТ транспорта: кнопочных
- * фич ещё нет (финансовые [Оплачено]/[Отложить], селекторы периода — отдельно),
- * поэтому диспетчеризации по callback_data нет. Гасим «часики» на кнопке и логируем.
+ * Обработать нажатие инлайн-кнопки ([ADR-0023]).
  *
- * Инвариант на будущее: когда здесь появятся фичи, кормящие callback_data движку
- * (как ход или resume), их данные ОБЯЗАНЫ пройти failClosedSanitize ДО облака —
- * ровно как текстовый ход в handleJob (§2/[ADR-0015]). Сейчас callback_data никуда
- * наружу/в облако не уходит, поэтому маскер тут не нужен.
+ * Диспетчеризация по prefixу callback_data:
+ *   - Финансовые кнопки (callback_data начинается с CALLBACK_PREFIX = "fin:"):
+ *     → dispatchFinanceCallback (если financeLedger задан в state).
+ *     → answerCallbackQuery + лог если ledger не настроен.
+ *   - Всё остальное: best-effort answerCallbackQuery + лог (базовое поведение).
+ *
+ * Инвариант: callback_data никогда не уходит в облако (в отличие от текстового хода),
+ * поэтому failClosedSanitize здесь не нужен. Если в будущем callback_data будет
+ * передаваться движку — маскировать ОБЯЗАТЕЛЬНО ([ADR-0015]).
  */
 async function handleCallbackQuery(
 	state: BridgeState,
 	job: Job,
 	cb: CallbackInfo,
 ): Promise<void> {
-	// Best-effort: без ответа кнопка крутит «часики» у владельца до таймаута.
-	await state.telegram.answerCallbackQuery(cb.id);
 	log.info({ chatId: job.chatId, data: cb.data, messageId: cb.messageId }, 'callback.received');
+
+	// Финансовые кнопки ([ADR-0024]): кнопочные флоу кредит-напоминаний.
+	// dispatchFinanceCallback сам гасит «часики» (answerCallbackQuery) и проверяет owner-гейт.
+	if (cb.data.startsWith(CALLBACK_PREFIX) && state.financeLedger) {
+		await dispatchFinanceCallback(
+			{
+				chatId: job.chatId,
+				fromId: job.chatId, // В приватном чате from.id == chat.id == owner (ADR-0009).
+				callbackQueryId: cb.id,
+				data: cb.data,
+			},
+			{
+				ownerChatId: state.settings.ownerChatId,
+				telegram: state.telegram,
+				ledger: state.financeLedger,
+			},
+		);
+		return;
+	}
+
+	// Остальные (не-финансовые) callback'и или финансовые при отключённом ledger:
+	// гасим «часики» best-effort и логируем.
+	await state.telegram.answerCallbackQuery(cb.id);
 }
 
 // --------------------------------------------------------------------------- //
