@@ -20,16 +20,19 @@
  *   - Мультивалютность: нативные валюты хранятся as-is, нет «базовой».
  */
 
-import { appendFileSync, existsSync, mkdirSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
+import * as yaml from 'js-yaml';
 import { z } from 'zod';
 
 import { childLogger } from '../core/logger.js';
 import { chartSpec, type BalanceEntry, type CategoryEntry, type GoalProgressData } from '../ingest/finance/chart.js';
+import { createDefaultFxProvider, type FxProvider } from '../ingest/finance/fx.js';
+import { computeGoalProgress } from '../ingest/finance/goals.js';
 import { assertPathAllowed, Ledger, resolvePublicRepo } from '../ingest/finance/ledger.js';
 import { recordFinanceEntry } from '../ingest/finance/record.js';
-import { FinanceGoalSchema, type FinanceGoal, CreditRecordSchema } from '../ingest/finance/types.js';
+import { FinanceGoalSchema, type FinanceGoal, CreditRecordSchema, type AccountRecord } from '../ingest/finance/types.js';
 import { renderChartPng } from './finance-render.js';
 import {
 	readPendingCashSurvey,
@@ -266,6 +269,44 @@ const TransferIntentSchema = z.object({
 });
 
 /**
+ * BatchItemIntentSchema — под-союз типов, которые могут быть элементами batch.
+ *
+ * Разрешено: record_balance | record_cash | record_income | record_expense | transfer.
+ * Запрещено: batch (вложенный), query, create_goal, create_credit, edit, void.
+ * Это намеренное ограничение: batch плоский, не рекурсивный.
+ * Переиспользуем уже объявленные схемы — без дублирования полей.
+ */
+const BatchItemIntentSchema = z.discriminatedUnion('type', [
+	RecordBalanceIntentSchema,
+	RecordCashIntentSchema,
+	RecordIncomeIntentSchema,
+	RecordExpenseIntentSchema,
+	TransferIntentSchema,
+]);
+
+/** Тип одного элемента батча. */
+export type BatchItemIntent = z.infer<typeof BatchItemIntentSchema>;
+
+/**
+ * BatchIntent — несколько операций в одном сообщении.
+ * Пример: «На карте 50000 рублей и наличными 5 млн донгов» →
+ *   {"type":"batch","items":[{record_balance...},{record_cash...}]}
+ *
+ * Ограничения:
+ *   - items: min 1, max 20 (защита от злоупотреблений).
+ *   - Элементы — только record_balance/record_cash/record_income/record_expense/transfer,
+ *     не вложенные batch/query/create_* (batch плоский, не рекурсивный).
+ *   - dispatchFinanceIntent обрабатывает каждый item последовательно через
+ *     ту же логику что и одиночные record_balance/record_cash и т.д.
+ *   - Idle-watermark (writeLastInputTs) обновляется один раз после всего батча.
+ */
+const BatchIntentSchema = z.object({
+	type: z.literal('batch'),
+	/** items — массив операций для последовательной обработки. */
+	items: z.array(BatchItemIntentSchema).min(1).max(20),
+});
+
+/**
  * QueryIntent — запрос информации (net-worth, траты, цели, «могу ли»).
  * Query НИЧЕГО не пишет в леджер — только читает и отвечает.
  * Пример: «Сколько я потратил на еду в мае?» / «Какой мой net-worth?»
@@ -299,6 +340,7 @@ const QueryIntentSchema = z.object({
 
 /**
  * FinanceIntent — дискриминированный union всех видов финансовых намерений.
+ * Включает batch (несколько record_balance/transfer в одном сообщении, ADR-0024).
  */
 export const FinanceIntentSchema = z.discriminatedUnion('type', [
 	RecordBalanceIntentSchema,
@@ -311,6 +353,7 @@ export const FinanceIntentSchema = z.discriminatedUnion('type', [
 	VoidIntentSchema,
 	TransferIntentSchema,
 	QueryIntentSchema,
+	BatchIntentSchema,
 ]);
 
 export type FinanceIntent = z.infer<typeof FinanceIntentSchema>;
@@ -419,6 +462,13 @@ export interface FinanceIntentDeps {
 	 * В тестах: tmp-dir. Если не задан — pending-cash обработка пропускается (graceful).
 	 */
 	financeStateDir?: string;
+
+	/**
+	 * fx — провайдер курсов валют для расчёта прогресса цели в query-интентах.
+	 * Если не задан — создаётся createDefaultFxProvider() (Identity + Stablecoin + CBR).
+	 * В тестах: инъектируется мок-провайдер без реальной сети.
+	 */
+	fx?: FxProvider;
 }
 
 // ---------------------------------------------------------------------------
@@ -775,6 +825,64 @@ export async function dispatchFinanceIntent(
 			};
 		}
 
+		// ── Батч: несколько операций в одном сообщении ───────────────────────
+		// Дефект 1: без batch-интента «на карте 50000 и наличными 5 млн донгов»
+		// теряло наличку. Промпт уже инструктирует движок эмитировать batch —
+		// теперь код принимает и обрабатывает его.
+		case 'batch': {
+			// Агрегируем результаты всех items.
+			const allBalances: DispatchResult['balances'] = [];
+			const itemSummaries: string[] = [];
+
+			for (const item of intent.items) {
+				// Диспетчеризуем каждый элемент batch-а через ту же функцию:
+				// рекурсивно вызываем dispatchFinanceIntent с одиночным интентом.
+				// Это гарантирует единообразную логику — без дублирования веток.
+				// Idle-watermark НЕ обновляем здесь — обновим один раз после цикла.
+				const itemDeps: FinanceIntentDeps = {
+					...deps,
+					// Подавляем watermark-обновление внутри рекурсивного вызова:
+					// передаём financeStateDir=undefined чтобы writeLastInputTs
+					// не вызывался для каждого item — только один раз по окончании.
+					financeStateDir: undefined,
+				};
+				// Диспетчеризуем элемент как обычный одиночный интент.
+				const itemResult = await dispatchFinanceIntent(item, itemDeps);
+
+				// Собираем строку-сводку для каждого элемента (что именно записано).
+				itemSummaries.push(itemResult.summary);
+
+				// Объединяем балансы (дедупируем по account_id: берём последний).
+				for (const bal of itemResult.balances) {
+					const existingIdx = allBalances.findIndex((b) => b.account_id === bal.account_id);
+					if (existingIdx >= 0) {
+						// Обновляем: последующий item переписал баланс счёта.
+						allBalances[existingIdx] = bal;
+					} else {
+						allBalances.push(bal);
+					}
+				}
+			}
+
+			// Краткое summary batch-а: перечень всех обработанных операций.
+			const batchSummary = `Батч (${intent.items.length} оп.): ${itemSummaries.join(' | ')}`;
+
+			// Обновляем idle-watermark один раз по итогам всего батча (блокер #8).
+			if (deps.financeStateDir) {
+				writeLastInputTs(deps.financeStateDir, nowFn().toISOString());
+			}
+
+			return {
+				intent,
+				summary: batchSummary,
+				balances: allBalances,
+				queryContext: null,
+				goalPage: null,
+				chartPngSent: false,
+				pendingCashHandled: false,
+			};
+		}
+
 		// ── Перевод между счетами ─────────────────────────────────────────────
 		case 'transfer': {
 			const result = recordFinanceEntry(
@@ -900,7 +1008,9 @@ export async function dispatchFinanceIntent(
 
 		// ── Query: чтение и агрегация данных (без записи) ────────────────────
 		case 'query': {
-			const queryContext = await buildQueryContext(intent, ledger, nowFn);
+			// Пробрасываем goalsDir и fx из deps, чтобы buildQueryContext мог прочитать
+			// страницу цели и вызвать computeGoalProgress с реальными данными.
+			const queryContext = await buildQueryContext(intent, ledger, nowFn, deps.goalsDir, deps.fx);
 			const summary = formatQuerySummaryLine(intent);
 
 			// ── Реактивная доставка графика (#6/#9) ──────────────────────────────
@@ -1266,6 +1376,44 @@ function goalKindRu(kind: FinanceGoal['fin_kind']): string {
 }
 
 // ---------------------------------------------------------------------------
+// Вспомогательные функции парсинга
+// ---------------------------------------------------------------------------
+
+/**
+ * normalizeYamlDates — нормализует объект из js-yaml: заменяет все Date-объекты
+ * на ISO-строки (toISOString()), рекурсивно обходя поля.
+ *
+ * Проблема: js-yaml по умолчанию конвертирует голые YAML-даты (2026-12-31) в объекты
+ * Date. FinanceGoalSchema ожидает строку (isoTimestamp = z.string()). Без нормализации
+ * safeParse падает с ошибкой типа.
+ *
+ * Обходит только plain-объекты и массивы — не трогает примитивы и null.
+ *
+ * @param value — произвольное значение из yaml.load()
+ * @returns нормализованное значение с Date → ISO-string
+ */
+function normalizeYamlDates(value: unknown): unknown {
+	// Date → ISO-строка (убираем миллисекунды для краткости: "2026-12-31T00:00:00Z").
+	if (value instanceof Date) {
+		return value.toISOString().replace(/\.\d{3}Z$/, 'Z');
+	}
+	// Массив — рекурсивно обходим элементы.
+	if (Array.isArray(value)) {
+		return value.map(normalizeYamlDates);
+	}
+	// Plain-объект — рекурсивно обходим поля.
+	if (value !== null && typeof value === 'object') {
+		const result: Record<string, unknown> = {};
+		for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
+			result[key] = normalizeYamlDates(val);
+		}
+		return result;
+	}
+	// Примитивы (string, number, boolean, null) — возвращаем как есть.
+	return value;
+}
+
+// ---------------------------------------------------------------------------
 // Агрегация данных для query-интентов
 // ---------------------------------------------------------------------------
 
@@ -1278,15 +1426,21 @@ function goalKindRu(kind: FinanceGoal['fin_kind']): string {
  * Для 'net_worth': читает все снапшоты и кредиты, агрегирует по валютам.
  * Для 'spending': фильтрует транзакции по периоду/категории.
  * Для 'summary': собирает балансы всех счетов.
+ * Для 'goal_progress': читает страницу цели из goalsDir, собирает снапшоты,
+ *   вызывает computeGoalProgress → реальные {current, target, pct, currency}.
  *
- * @param intent  — QueryIntent с параметрами запроса
- * @param ledger  — Ledger для чтения (без записи)
- * @param nowFn   — функция текущего времени
+ * @param intent    — QueryIntent с параметрами запроса
+ * @param ledger    — Ledger для чтения (без записи)
+ * @param nowFn     — функция текущего времени
+ * @param goalsDir  — каталог страниц finance-goal (опц.; graceful если не задан)
+ * @param fxInput   — провайдер курсов валют (опц.; дефолт — createDefaultFxProvider())
  */
 async function buildQueryContext(
 	intent: z.infer<typeof QueryIntentSchema>,
 	ledger: Ledger,
 	nowFn: () => Date,
+	goalsDir?: string,
+	fxInput?: FxProvider,
 ): Promise<QueryContext> {
 	// Читаем все данные из леджера (read-only, append-only гарантирован леджером).
 	const snapshots = ledger.readAll('snapshots');
@@ -1369,25 +1523,118 @@ async function buildQueryContext(
 	}
 
 	// ── Прогресс по цели (для query_kind='goal_progress') ────────────────────
-	// Чтение финансовой цели: если goal_id задан — ищем страницу в goalsDir.
-	// Прогресс считаем детерминированно: балансы linked_accounts + snapshot-агрегат.
-	// Без FX-конвертации (нет провайдера в этом контексте) — грубый счёт в нативной валюте.
+	//
+	// Алгоритм (полный, детерминированный):
+	//   1. Если задан goal_id и goalsDir — читаем файл {goalsDir}/{goal_id}.md,
+	//      парсим YAML-фронтматтер, валидируем через FinanceGoalSchema.
+	//   2. Собираем релевантные снапшоты (все, если нет linked_accounts — они
+	//      будут отфильтрованы самим computeGoalProgress). Для debt_paydown —
+	//      снапшоты linked_accounts (кредитные счета) тоже учитываются.
+	//   3. Вызываем computeGoalProgress(goal, snapshots, fx, asOf) →
+	//      { current, target, pct, currency, coarse, missing_fx }.
+	//   4. Graceful: если goalsDir не задан ИЛИ файл не найден — возвращаем null
+	//      (честное «цель не найдена»); если goal_id не задан — null тоже.
+	//
+	// Примечание: debt_paydown-цель обрабатывается через linked_accounts:
+	//   linked_accounts указывают на счёт-долг, снапшоты которого дают
+	//   текущий остаток, а computeGoalProgress считает прогресс корректно
+	//   (progress = 1 - balance/target или balance снижается до 0).
 	let goalProgress: QueryContext['goalProgress'] = null;
 	if (intent.query_kind === 'goal_progress' && intent.goal_id) {
-		// Ищем транзакции с goal_tag = goal_id для подсчёта накопленного.
-		const goalTxs = transactions.filter(
-			(tx) => tx.goal_tag === intent.goal_id && tx.direction === 'in',
-		);
-		const totalSaved = goalTxs.reduce((sum, tx) => sum + tx.amount, 0);
-		// Без данных о target_amount из страницы (нет доступа к goalsDir в этом контексте)
-		// даём частичный результат с суммой накоплений.
-		goalProgress = {
-			goal_id: intent.goal_id,
-			current: totalSaved,
-			target: 0, // 0 = данные о цели не прочитаны (нет goalsDir в query-контексте)
-			pct: 0,
-			currency: '?',
-		};
+		const goalId = intent.goal_id;
+
+		// Пытаемся прочитать страницу цели из goalsDir.
+		let parsedGoal: FinanceGoal | null = null;
+		if (goalsDir) {
+			const goalFilePath = join(goalsDir, `${goalId}.md`);
+			try {
+				// Читаем markdown-файл и извлекаем YAML-фронтматтер.
+				// Формат: ---\n{yaml}\n---\n{markdown body}.
+				const fileContent = readFileSync(goalFilePath, 'utf8');
+				const fmMatch = /^---\r?\n([\s\S]*?)\r?\n---/.exec(fileContent);
+				if (fmMatch?.[1]) {
+					// Парсим YAML-фронтматтер через js-yaml (тот же способ, что пишет createGoalPage).
+					// ВАЖНО: js-yaml автоматически конвертирует голые даты YAML (напр. 2026-12-31)
+					// в объекты Date. FinanceGoalSchema ожидает строку (isoTimestamp = z.string()).
+					// Нормализуем: все Date-объекты в полях заменяем на ISO-строку (.toISOString()).
+					const rawFm = normalizeYamlDates(yaml.load(fmMatch[1]));
+					const validated = FinanceGoalSchema.safeParse(rawFm);
+					if (validated.success) {
+						parsedGoal = validated.data;
+					} else {
+						log.warn(
+							{ goalId, errors: validated.error.errors },
+							'finance-intent: невалидный фронтматтер страницы цели',
+						);
+					}
+				} else {
+					log.warn(
+						{ goalId, goalFilePath },
+						'finance-intent: файл цели не содержит YAML-фронтматтера',
+					);
+				}
+			} catch (readErr) {
+				// Файл не найден или не читается — graceful: цель не найдена.
+				log.warn(
+					{ goalId, goalFilePath, err: String(readErr) },
+					'finance-intent: страница цели не найдена в goalsDir',
+				);
+			}
+		}
+
+		if (parsedGoal !== null) {
+			// Страница цели прочитана — вызываем детерминированный computeGoalProgress.
+			// FxProvider: используем переданный или создаём дефолтный (Identity + Stablecoin + CBR).
+			// В тестах всегда передаётся мок-провайдер без реальной сети.
+			const fx = fxInput ?? createDefaultFxProvider();
+
+			// Передаём ВСЕ снапшоты — computeGoalProgress сам фильтрует по linked_accounts.
+			// Если linked_accounts не заданы (режим goal_tag) — передаём транзакционные снапшоты:
+			// в режиме goal_tag computeGoalProgress ожидает, что caller уже отфильтровал снапшоты.
+			// Здесь мы не знаем, какие именно счета (нет goal_tag в SnapshotRecord), поэтому:
+			//   — если linked_accounts заданы → все снапшоты (computeGoalProgress отфильтрует)
+			//   — если linked_accounts не заданы → передаём пустой массив (нет автосвязки)
+			//     плюс синтетические «снапшоты» из транзакций с goal_tag (накоплена сумма).
+			let relevantSnapshots = snapshots;
+			if (!parsedGoal.linked_accounts || parsedGoal.linked_accounts.length === 0) {
+				// Нет привязанных счетов — строим синтетический снапшот из суммы транзакций
+				// с goal_tag, чтобы computeGoalProgress получил хотя бы текущую накопленную сумму.
+				const goalTxs = transactions.filter(
+					(tx) => tx.goal_tag === goalId && tx.direction === 'in' && tx.ts <= asOf,
+				);
+				const totalFromTxs = goalTxs.reduce((sum, tx) => sum + tx.amount, 0);
+				// Синтетический снапшот с суммой транзакций, помечен как virtual-account.
+				relevantSnapshots = totalFromTxs > 0
+					? [{
+						ts: asOf,
+						account_id: `__goal_tag_${goalId}__`,
+						balance: totalFromTxs,
+						currency: parsedGoal.currency,
+					}]
+					: [];
+			}
+
+			try {
+				// Вызываем готовый детерминированный движок расчёта прогресса.
+				const progress = await computeGoalProgress(parsedGoal, relevantSnapshots, fx, asOf);
+				goalProgress = {
+					goal_id: goalId,
+					current: progress.current,
+					target: progress.target,
+					pct: progress.pct,
+					currency: progress.currency,
+				};
+			} catch (computeErr) {
+				// computeGoalProgress никогда не должен бросать, но на всякий случай — graceful.
+				log.warn(
+					{ goalId, err: String(computeErr) },
+					'finance-intent: ошибка computeGoalProgress — возвращаем null',
+				);
+				// goalProgress остаётся null
+			}
+		}
+		// Если parsedGoal === null (goalsDir не задан или файл не найден):
+		// goalProgress = null — честное «цель не найдена», без фолбэка-фантома.
 	}
 
 	// ── Дискреционный бюджет (для query_kind='feasibility') ──────────────────
@@ -1449,8 +1696,18 @@ export function formatReadback(result: DispatchResult): string {
 	// Первая строка: краткое действие.
 	lines.push(result.summary);
 
-	// Для record-интентов: показываем текущие балансы по счетам.
-	if (result.balances.length > 0) {
+	// Для batch-интента: показываем итоговые балансы ВСЕХ затронутых счетов —
+	// владелец должен видеть, что учтены ВСЕ счета из батча.
+	// Балансы уже агрегированы в dispatchFinanceIntent case 'batch'.
+	if (result.intent.type === 'batch' && result.balances.length > 0) {
+		// Выводим каждый счёт на отдельной строке для наглядности.
+		for (const b of result.balances) {
+			lines.push(`  • ${b.balance} ${b.currency} (счёт ${b.account_id.slice(0, 8)}…)`);
+		}
+	}
+
+	// Для обычных record-интентов: показываем текущие балансы по счетам.
+	if (result.intent.type !== 'batch' && result.balances.length > 0) {
 		const balStr = result.balances
 			.map((b) => `${b.balance} ${b.currency}`)
 			.join(' / ');
@@ -1490,11 +1747,25 @@ export function formatReadback(result: DispatchResult): string {
 			lines.push(`Траты: ${spendStr}`);
 		}
 
-		// Прогресс по цели.
-		if (ctx.goalProgress && ctx.goalProgress.current > 0) {
-			lines.push(
-				`Цель ${ctx.goalProgress.goal_id}: накоплено ${ctx.goalProgress.current} ${ctx.goalProgress.currency}`,
-			);
+		// Прогресс по цели — показываем реальные target/pct если они получены
+		// из computeGoalProgress (target > 0), иначе только текущую сумму.
+		if (ctx.goalProgress) {
+			const gp = ctx.goalProgress;
+			if (gp.current > 0 || gp.target > 0) {
+				if (gp.target > 0) {
+					// Полный прогресс: текущее / целевое = X%.
+					const pctStr = `${Math.round(gp.pct)}%`;
+					lines.push(
+						`Цель ${gp.goal_id}: ${gp.current} / ${gp.target} ${gp.currency} (${pctStr})`,
+					);
+				} else {
+					// Фолбэк: target не известен (не должно происходить после исправления,
+					// но защищаемся на случай graceful-ситуации).
+					lines.push(
+						`Цель ${gp.goal_id}: накоплено ${gp.current} ${gp.currency}`,
+					);
+				}
+			}
 		}
 
 		// Feasibility.
@@ -1523,11 +1794,17 @@ export function formatReadback(result: DispatchResult): string {
  * Если леджер пустой или недоступен — возвращает null (безопасно: движок отвечает
  * из общих знаний без контекста).
  *
- * @param ledger — Ledger (read-only)
- * @param nowFn  — функция текущего времени
+ * @param ledger   — Ledger (read-only)
+ * @param goalsDir — каталог страниц finance-goal (опц.; если задан и существует —
+ *                   добавляет секцию «Активные цели:» с goal_id/title/target/дата).
+ *                   Без goalsDir поведение как раньше — секция целей не добавляется.
+ *                   Это устраняет дефект 2: движок не знал goal_id и падал в feasibility
+ *                   вместо корректного emit goal_progress при живом прогоне.
+ * @param nowFn    — функция текущего времени
  */
 export function buildFinanceContextSummary(
 	ledger: Ledger,
+	goalsDir?: string,
 	nowFn: () => Date = () => new Date(),
 ): string | null {
 	try {
@@ -1542,6 +1819,17 @@ export function buildFinanceContextSummary(
 
 		// Нормализуем до ISO без миллисекунд (аналогично buildQueryContext выше).
 		const asOf = nowFn().toISOString().replace(/\.\d{3}Z$/, 'Z');
+
+		// ── Словарь счетов: account_id → {name, kind} ────────────────────────────
+		// Читаем AccountRecord'ы один раз; дедупируем: если один id встречается
+		// дважды (повторная запись при обновлении name) — берём последнюю запись
+		// (JSONL append-only, последняя в файле актуальнее).
+		const accounts = ledger.readAll('accounts');
+		const accountMeta = new Map<string, { name: string; kind: AccountRecord['kind'] }>();
+		for (const acc of accounts) {
+			// Перетираем — последняя запись в файле побеждает (append-only семантика).
+			accountMeta.set(acc.id, { name: acc.name, kind: acc.kind });
+		}
 
 		// Агрегируем балансы по нативным валютам (последний снапшот ≤ asOf).
 		const latestByAccount = new Map<string, { currency: string; balance: number; ts: string }>();
@@ -1597,6 +1885,26 @@ export function buildFinanceContextSummary(
 		// Строим сводку (plain-text, без markdown — Telegram без parse_mode).
 		const lines: string[] = ['[Финансовый контекст (автоматически, актуально на сейчас)]'];
 
+		// ── Секция «Счета:» — перечень КАЖДОГО счёта по имени (fix дефекта S7) ───
+		// Движок ОБЯЗАН переиспользовать точное имя счёта из этого списка — не
+		// выдумывать новое (именно это приводило к созданию дубля «Кошелёк RUB»).
+		// Формат: «Счета: Тинькофф (checking, RUB) = 50000; Наличные VND (cash, VND) = 5000000».
+		// Отображаем только счета с известным балансом ≤ asOf.
+		if (latestByAccount.size > 0) {
+			const accountParts: string[] = [];
+			for (const [accountId, { currency, balance }] of latestByAccount.entries()) {
+				const meta = accountMeta.get(accountId);
+				if (meta) {
+					// Счёт найден в AccountRecord — показываем имя + kind + валюта + баланс.
+					accountParts.push(`${meta.name} (${meta.kind}, ${currency}) = ${balance}`);
+				} else {
+					// AccountRecord не найден (аномалия) — показываем обрезанный id.
+					accountParts.push(`account:${accountId.slice(0, 8)} (${currency}) = ${balance}`);
+				}
+			}
+			lines.push(`Счета: ${accountParts.join('; ')}`);
+		}
+
 		if (balByCurrency.size > 0) {
 			const balStr = Array.from(balByCurrency.entries())
 				.map(([cur, val]) => `${val} ${cur}`)
@@ -1612,15 +1920,69 @@ export function buildFinanceContextSummary(
 		}
 
 		if (latestCredits.size > 0) {
-			const creditStr = Array.from(latestCredits.values())
-				.map(({ currency, balance }) => `${balance} ${currency}`)
-				.join(', ');
-			lines.push(`Обязательства (кредиты): ${creditStr}`);
+			// ── Секция «Кредиты:» — перечень активных кредитов с id ──────────────
+			// Движок должен знать credit_id для корректного emit balance_update_credit
+			// (иначе выдумывает id — приводит к созданию дублей кредитов).
+			// Формат: «Кредиты: sber-2026 (RUB) = 600000; card-alfa (RUB) = 42000».
+			const creditParts: string[] = [];
+			for (const [creditId, { currency, balance }] of latestCredits.entries()) {
+				creditParts.push(`${creditId} (${currency}) = ${balance}`);
+			}
+			lines.push(`Кредиты: ${creditParts.join('; ')}`);
 		}
 
 		if (topSpend.length > 0) {
 			const spendStr = topSpend.map((s) => `${s.cat} ${s.amount} ${s.currency}`).join(', ');
 			lines.push(`Траты за текущий месяц: ${spendStr}`);
+		}
+
+		// ── Активные цели (дефект 2) ──────────────────────────────────────────
+		// Без секции целей движок не знал goal_id и не мог корректно эмитировать
+		// query/goal_progress — в живом прогоне сваливался в feasibility.
+		// Читаем страницы *.md из goalsDir, парсим фронтматтер (FinanceGoalSchema),
+		// добавляем строки вида «- <goal_id>: <title>, цель <target_amount> <currency> к <target_date>».
+		if (goalsDir) {
+			try {
+				// Проверяем что каталог существует — existsSync не бросает.
+				if (existsSync(goalsDir)) {
+					// Читаем список файлов через readdirSync (синхронно, как весь метод).
+					const files = readdirSync(goalsDir).filter((f) => f.endsWith('.md'));
+					const goalLines: string[] = [];
+
+					for (const file of files) {
+						try {
+							const filePath = join(goalsDir, file);
+							const content = readFileSync(filePath, 'utf8');
+							// Извлекаем YAML-фронтматтер (--- ... ---).
+							const fmMatch = /^---\r?\n([\s\S]*?)\r?\n---/.exec(content);
+							if (!fmMatch?.[1]) continue;
+
+							// Парсим и нормализуем (Date → ISO string) как в buildQueryContext.
+							const rawFm = normalizeYamlDates(yaml.load(fmMatch[1]));
+							const validated = FinanceGoalSchema.safeParse(rawFm);
+							if (!validated.success) continue;
+
+							const goal = validated.data;
+							// Формат строки: «- <goal_id>: цель <amount> <currency> к <date>».
+							// FinanceGoalSchema не содержит поля title (оно только в markdown-body),
+							// поэтому используем goal_id как идентификатор — это именно то, что
+							// нужно движку для корректного emit query/goal_progress (goal_id важнее title).
+							goalLines.push(
+								`- ${goal.id}: цель ${goal.target_amount} ${goal.currency} к ${goal.target_date.slice(0, 10)}`,
+							);
+						} catch {
+							// Ошибка чтения/парсинга одного файла — пропускаем, продолжаем.
+						}
+					}
+
+					if (goalLines.length > 0) {
+						lines.push(`Активные цели:\n${goalLines.join('\n')}`);
+					}
+				}
+			} catch (goalsErr) {
+				// Ошибка чтения goalsDir — не роняем метод, контекст без секции целей.
+				log.warn({ err: String(goalsErr) }, 'finance-intent: ошибка чтения goalsDir в buildFinanceContextSummary');
+			}
 		}
 
 		lines.push('[/Финансовый контекст]');

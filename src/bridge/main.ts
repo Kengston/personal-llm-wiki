@@ -79,8 +79,10 @@ async function main(): Promise<void> {
 	// на момент старта. Контекст статичный на старт процесса — приемлемо для single-user
 	// single-session моста (ходы сериализованы, следующий старт подтянет свежий контекст).
 	const basePersona = loadPersona(personaFile);
+	// Дефект 2: передаём financeGoalsDir чтобы движок видел goal_id в системном промпте
+	// и мог корректно эмитировать query/goal_progress (без этого сваливался в feasibility).
 	const financeContext = financeLedger
-		? buildFinanceContextSummary(financeLedger)
+		? buildFinanceContextSummary(financeLedger, financeGoalsDir)
 		: null;
 	const systemPrompt = financeLedger
 		? appendFinanceInstruction(basePersona, financeContext)
