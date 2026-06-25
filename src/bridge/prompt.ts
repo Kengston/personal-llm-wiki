@@ -116,6 +116,18 @@ export const FINANCE_INTENT_INSTRUCTION = `
 {"type":"create_goal","goal_id":"emergency-fund-2026","title":"Подушка безопасности","target_amount":300000,"currency":"RUB","target_date":"2026-12-31","fin_kind":"save"}
 \`\`\`
 
+**create_credit** — новый кредит/заём (банк, тело долга, ставка, платёж, дата платежа, тип):
+\`\`\`finance-intent
+{"type":"create_credit","credit_id":"sber-2026","label":"Кредит Сбер","principal":600000,"currency":"RUB","rate_pct":18,"monthly_payment":20000,"next_payment_date":"2026-07-10","credit_type":"annuity"}
+\`\`\`
+credit_type — "annuity" (аннуитет) либо "differentiated". credit_id — короткий id латиницей (банк+год). НЕ записывай кредит как record_balance: у кредита своя амортизация и напоминания о платеже.
+
+**batch** — НЕСКОЛЬКО операций из ОДНОГО сообщения (напр. «на карте 50000 и наличными 5 млн донгов»). items — массив полноценных record_*-интентов:
+\`\`\`finance-intent
+{"type":"batch","items":[{"type":"record_balance","account":{"source":"manual","name":"Карта RUB","currency":"RUB","kind":"checking"},"balance":50000},{"type":"record_cash","account":{"source":"manual","name":"Наличные VND","currency":"VND","kind":"cash"},"balance":5000000}]}
+\`\`\`
+Если в сообщении упомянуто БОЛЬШЕ ОДНОГО счёта/баланса/операции — ОБЯЗАТЕЛЬНО используй batch, не теряй ни один счёт.
+
 **transfer** — перевод между своими счетами:
 \`\`\`finance-intent
 {"type":"transfer","from_account":{"source":"manual","name":"Тинькофф","currency":"RUB","kind":"checking"},"to_account":{"source":"manual","name":"Сбербанк","currency":"RUB","kind":"checking"},"amount":10000,"currency":"RUB"}
@@ -143,6 +155,17 @@ export const FINANCE_INTENT_INSTRUCTION = `
 \`\`\`finance-intent
 {"type":"query","query_kind":"feasibility","amount":200000,"currency":"RUB","question":"могу ли позволить отпуск?"}
 \`\`\`
+или (прогресс по КОНКРЕТНОЙ цели — «сколько накопил на цель X», «какой процент», «сколько осталось»):
+\`\`\`finance-intent
+{"type":"query","query_kind":"goal_progress","goal_id":"apartment-2027"}
+\`\`\`
+goal_id бери из списка активных целей в финансовом контексте выше.
+
+### Маршрутизация (выбор типа — важно):
+- Условия кредита (банк + тело долга + ставка/платёж/дата/тип) → **create_credit** (НЕ record_balance).
+- Вопрос про прогресс конкретной цели (сколько накоплено / процент / сколько осталось) → **query/goal_progress** с goal_id (НЕ feasibility). feasibility — только для «могу ли позволить <покупку>».
+- Несколько счетов/операций в одном сообщении → **batch** (не выбирай один, не теряй остальные).
+- СУЩЕСТВУЮЩИЙ счёт: бери его ТОЧНОЕ имя (name) из списка «Счета:» в финансовом контексте выше. НЕ копируй имена из ПРИМЕРОВ этой инструкции и не выдумывай — иначе создашь дубль-счёт. Поправка/обновление баланса существующего счёта → record_balance с тем же именем (новый снапшот заменяет старый баланс).
 
 ### Мультивалютность:
 Каждая валюта хранится НАТИВНО (RUB, USD, GEL, USDT и т.д.) — не конвертируй самостоятельно.
