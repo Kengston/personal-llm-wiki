@@ -349,6 +349,113 @@ describe('buildFinanceSectionForDigest', () => {
 		expect(buildFinanceSectionForDigest(result)).toBe('');
 	});
 
+	it('регресс: пустой FinanceDueResult → финсекция пуста → дайджест-промпт НЕ содержит ФИНАНСОВЫЙ ПУЛЬС', async () => {
+		// Проверяет что при пустом финансовом состоянии (нет кредитов, нет майлстоунов)
+		// финансовый блок НЕ вставляется в sweep-промпт и НЕ меняет дайджест.
+		// Регресс-инвариант: пользователь без финданных получает тот же дайджест, что был бы без финансов.
+		let dir: string = '';
+		try {
+			dir = mkdtempSync(join(tmpdir(), 'digest-empty-finance-test-'));
+			const cfg = makeCfg(dir);
+			const emptyFinDue: FinanceDueResult = {
+				credits: [],
+				milestones: [],
+				cashSurvey: { isDue: false, fireKey: 'cash-survey:2026-06-08' },
+				idleNudge: { isDue: false, idleDays: 0, fireKey: 'idle-nudge:2026-06-08' },
+			};
+
+			// Пишем due-напоминание чтобы sweep не отсеялся на шаге «нечего due».
+			writeFileSync(
+				cfg.remindersPath,
+				['---', 'id: t', 'due_at: 2026-06-08T10:02:00+03:00', 'status: pending'].join('\n'),
+				'utf8',
+			);
+
+			const written: string[] = [];
+			const spy = vi.spyOn(process.stdout, 'write').mockImplementation((s) => {
+				written.push(String(s));
+				return true;
+			});
+
+			await runSweep(cfg, { now: NOW, dryRun: true, finDue: emptyFinDue });
+			spy.mockRestore();
+
+			const combined = written.join('');
+			// Пустой finDue → финансовый блок НЕ добавляется в промпт.
+			expect(combined).not.toContain('ФИНАНСОВЫЙ ПУЛЬС');
+		} finally {
+			if (dir) rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it('регресс: runSweep БЕЗ опции finDue (как в проде routines.ts/main) → промпт без ФИНАНСОВЫЙ ПУЛЬС', async () => {
+		// Пиннит ТЕКУЩЕЕ безопасное прод-поведение: и runDigest (routines.ts:169),
+		// и digest.ts main зовут runSweep(cfg, { now, dryRun }) — БЕЗ ключа finDue вообще.
+		// Тогда opts.finDue ?? null === null → buildFinanceSectionForDigest(null) === '' →
+		// финблок не вставляется. Это значит, что проактивный финансовый пульс сейчас «тёмный»:
+		// у обычного бота (без явной передачи finDue) дайджест не меняется от наличия финансов.
+		// Отличается от соседнего теста тем, что finDue не передаётся СОВСЕМ (а не =null) —
+		// фиксируем форму прод-вызова, а не один частный аргумент.
+		let dir: string = '';
+		try {
+			dir = mkdtempSync(join(tmpdir(), 'digest-no-findue-test-'));
+			const cfg = makeCfg(dir);
+
+			// Пишем due-напоминание чтобы sweep не отсеялся на шаге «нечего due» и реально дошёл до промпта.
+			writeFileSync(
+				cfg.remindersPath,
+				['---', 'id: t', 'due_at: 2026-06-08T10:02:00+03:00', 'status: pending'].join('\n'),
+				'utf8',
+			);
+
+			const written: string[] = [];
+			const spy = vi.spyOn(process.stdout, 'write').mockImplementation((s) => {
+				written.push(String(s));
+				return true;
+			});
+
+			// КЛЮЧЕВОЕ: опции ровно как в проде — без finDue.
+			await runSweep(cfg, { now: NOW, dryRun: true });
+			spy.mockRestore();
+
+			const combined = written.join('');
+			// Прод-вызов без finDue → финансовая секция отсутствует в дайджест-промпте.
+			expect(combined).not.toContain('ФИНАНСОВЫЙ ПУЛЬС');
+		} finally {
+			if (dir) rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it('регресс: finDue=null → финсекция пуста → дайджест-промпт без ФИНАНСОВЫЙ ПУЛЬС', async () => {
+		// Проверяет что finDue=null (финансовый свип не запускался) → дайджест без финсекции.
+		let dir: string = '';
+		try {
+			dir = mkdtempSync(join(tmpdir(), 'digest-null-finance-test-'));
+			const cfg = makeCfg(dir);
+
+			writeFileSync(
+				cfg.remindersPath,
+				['---', 'id: t', 'due_at: 2026-06-08T10:02:00+03:00', 'status: pending'].join('\n'),
+				'utf8',
+			);
+
+			const written: string[] = [];
+			const spy = vi.spyOn(process.stdout, 'write').mockImplementation((s) => {
+				written.push(String(s));
+				return true;
+			});
+
+			await runSweep(cfg, { now: NOW, dryRun: true, finDue: null });
+			spy.mockRestore();
+
+			const combined = written.join('');
+			// null finDue → buildFinanceSectionForDigest('') → финблок не вставляется.
+			expect(combined).not.toContain('ФИНАНСОВЫЙ ПУЛЬС');
+		} finally {
+			if (dir) rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	it('runSweep с finDue — финанс-блок встраивается в промпт (dry-run)', async () => {
 		let dir: string = '';
 		try {

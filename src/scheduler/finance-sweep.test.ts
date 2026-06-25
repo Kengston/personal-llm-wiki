@@ -33,7 +33,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import type { FxProvider } from '../ingest/finance/fx.js';
-import type { CreditRecord, FinanceGoal, SnapshotRecord } from '../ingest/finance/types.js';
+import type { AccountRecord, CreditRecord, FinanceGoal, SnapshotRecord } from '../ingest/finance/types.js';
 import type { ChartSpec } from '../ingest/finance/chart.js';
 import {
 	buildFinanceDigestSection,
@@ -448,18 +448,23 @@ describe('collectFinanceDue — cash-survey и idle-nudge', () => {
 		rmSync(stateDir, { recursive: true, force: true });
 	});
 
-	it('cash-survey: вечерний час + не было опроса → isDue=true', async () => {
+	it('cash-survey: вечерний час + cash-аккаунт + не было опроса → isDue=true', async () => {
 		const cfg = makeSweepCfg(stateDir);
 		// FAKE_NOW = 16:00 UTC = 19:00 MSK → вечерний час.
-		const result = await collectFinanceDue([], [], [], FAKE_FX, FAKE_NOW, cfg);
+		// ГЕЙТ: передаём cash-аккаунт — иначе isDue=false (новый гейт hasCashAccount).
+		const result = await collectFinanceDue([], [], [], FAKE_FX, FAKE_NOW, cfg, [
+			{ id: 'fake-cash-01', name: 'Кошелёк', kind: 'cash', currency: 'RUB', source: 'manual' },
+		]);
 		expect(result.cashSurvey.isDue).toBe(true);
 	});
 
-	it('cash-survey: не вечерний час → isDue=false', async () => {
+	it('cash-survey: не вечерний час → isDue=false (даже с cash-аккаунтом)', async () => {
 		const cfg = makeSweepCfg(stateDir);
 		// 08:00 UTC = 11:00 MSK → не вечер.
 		const dayNow = '2026-06-23T08:00:00Z';
-		const result = await collectFinanceDue([], [], [], FAKE_FX, dayNow, cfg);
+		const result = await collectFinanceDue([], [], [], FAKE_FX, dayNow, cfg, [
+			{ id: 'fake-cash-01', name: 'Кошелёк', kind: 'cash', currency: 'RUB', source: 'manual' },
+		]);
 		expect(result.cashSurvey.isDue).toBe(false);
 	});
 
@@ -470,7 +475,10 @@ describe('collectFinanceDue — cash-survey и idle-nudge', () => {
 		const todayKey = `cash-survey:2026-06-23`;
 		markFired(stateDir, todayKey, FAKE_NOW);
 
-		const result = await collectFinanceDue([], [], [], FAKE_FX, FAKE_NOW, cfg);
+		// Даже с cash-аккаунтом дедуп работает.
+		const result = await collectFinanceDue([], [], [], FAKE_FX, FAKE_NOW, cfg, [
+			{ id: 'fake-cash-01', name: 'Кошелёк', kind: 'cash', currency: 'RUB', source: 'manual' },
+		]);
 		expect(result.cashSurvey.isDue).toBe(false);
 	});
 
@@ -480,7 +488,9 @@ describe('collectFinanceDue — cash-survey и idle-nudge', () => {
 		// cashSurveyHour = 19, окно 18-21 ET → 18:00 ET = в окне → isDue=true.
 		const cfg = makeSweepCfg(stateDir, { tz: 'America/New_York', cashSurveyHour: 19 });
 		const nyEveningNow = '2026-06-23T22:00:00Z'; // = 18:00 ET (вечер, в окне 18-21)
-		const result = await collectFinanceDue([], [], [], FAKE_FX, nyEveningNow, cfg);
+		const result = await collectFinanceDue([], [], [], FAKE_FX, nyEveningNow, cfg, [
+			{ id: 'fake-cash-01', name: 'Кошелёк', kind: 'cash', currency: 'RUB', source: 'manual' },
+		]);
 		expect(result.cashSurvey.isDue).toBe(true);
 	});
 
@@ -488,7 +498,9 @@ describe('collectFinanceDue — cash-survey и idle-nudge', () => {
 		// now = 2026-06-23T14:00:00Z → New York = 10:00 ET → не вечер → isDue=false.
 		const cfg = makeSweepCfg(stateDir, { tz: 'America/New_York', cashSurveyHour: 19 });
 		const nyDayNow = '2026-06-23T14:00:00Z'; // = 10:00 ET (утро)
-		const result = await collectFinanceDue([], [], [], FAKE_FX, nyDayNow, cfg);
+		const result = await collectFinanceDue([], [], [], FAKE_FX, nyDayNow, cfg, [
+			{ id: 'fake-cash-01', name: 'Кошелёк', kind: 'cash', currency: 'RUB', source: 'manual' },
+		]);
 		expect(result.cashSurvey.isDue).toBe(false);
 	});
 
@@ -515,8 +527,9 @@ describe('collectFinanceDue — cash-survey и idle-nudge', () => {
 
 	it('idle-nudge дедуп: уже fired сегодня → isDue=false', async () => {
 		const cfg = makeSweepCfg(stateDir, { idleNudgeDays: 1 });
-		// Ввода никогда не было (порог 1 день → нудж должен был быть).
-		// Но помечаем как уже fired сегодня.
+		// Ввод 10 дней назад (нудж сработал бы без дедупа).
+		writeLastInputTs(stateDir, '2026-06-13T12:00:00Z');
+		// Помечаем как уже fired сегодня.
 		const nudgeKey = `idle-nudge:2026-06-23`;
 		markFired(stateDir, nudgeKey, FAKE_NOW);
 
@@ -1756,5 +1769,165 @@ describe('buildNetworthTimeSeries', () => {
 
 		// Не бросает, возвращает массив (может быть пустым или с нулевыми value).
 		expect(Array.isArray(points)).toBe(true);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// 17. Регресс: пустое финансовое состояние — НУЛЕВОЙ шум для не-финансового пользователя
+// ---------------------------------------------------------------------------
+
+/**
+ * Синтетический cash-аккаунт для позитивных тестов cash-survey.
+ * Пользователь завёл наличку → опрос уместен.
+ */
+const FAKE_CASH_ACCOUNT: AccountRecord = {
+	id: 'fake-cash-account-001',
+	name: 'Кошелёк RUB',
+	kind: 'cash',
+	currency: 'RUB',
+	source: 'manual',
+};
+
+/**
+ * Синтетический не-наличный аккаунт (расчётный счёт).
+ * Наличных нет → cash-survey НЕ должен предлагаться.
+ */
+const FAKE_CHECKING_ACCOUNT: AccountRecord = {
+	id: 'fake-checking-account-001',
+	name: 'Сбербанк Расчётный',
+	kind: 'checking',
+	currency: 'RUB',
+	source: 'manual',
+};
+
+describe('регресс: пустое финансовое состояние — нулевой шум для не-финансового пользователя', () => {
+	let stateDir: string;
+
+	beforeEach(() => {
+		stateDir = mkdtempSync(join(tmpdir(), 'finance-sweep-no-noise-'));
+	});
+
+	afterEach(() => {
+		rmSync(stateDir, { recursive: true, force: true });
+	});
+
+	// ── Ключевой инвариант: ПУСТОЙ леджер → НОЛЬ финансовых due-айтемов ────────
+
+	it('R1: пустой леджер + lastInputTs=null + нет accounts → ноль финансовых проактивных айтемов', async () => {
+		// Воспроизводит состояние «пользователь ни разу не использовал финансы»:
+		//   - credits=[], goals=[], snapshots=[] → нет кредитов/целей
+		//   - accounts=[] → нет cash-аккаунта → cash-survey молчит
+		//   - stateDir без last-input-ts.txt → lastInputTs=null → idle-nudge молчит
+		// Гейт FAKE_NOW = 16:00 UTC = 19:00 MSK (вечернее время → без гейта cash-survey сработал бы).
+		const cfg = makeSweepCfg(stateDir);
+		const result = await collectFinanceDue([], [], [], FAKE_FX, FAKE_NOW, cfg, [] /* нет accounts */);
+
+		// credits/milestones уже пусты (нет данных) — это тривиально.
+		expect(result.credits).toHaveLength(0);
+		expect(result.milestones).toHaveLength(0);
+
+		// Ключевые гейты: НЕТ ВООБЩЕ никакого финансового проактива.
+		expect(result.cashSurvey.isDue).toBe(false);
+		expect(result.idleNudge.isDue).toBe(false);
+	});
+
+	// ── idle-nudge гейт: lastInputTs=null → никогда не вводил → нет нуджа ─────
+
+	it('R2: lastInputTs=null → idle-nudge НЕ срабатывает (пользователь никогда не вводил финансы)', async () => {
+		// Тест воспроизводит реальный дефект: в исходном коде null трактовался
+		// как «давно не вводил» → нудж спамил тому, кто финансами не пользовался.
+		// Теперь null = «никогда не вводил» = нулевой проактив.
+		const cfg = makeSweepCfg(stateDir, { idleNudgeDays: 1 }); // очень короткий порог — без гейта сработал бы
+		// НЕ вызываем writeLastInputTs → файла нет → readLastInputTs=null.
+		const result = await collectFinanceDue([], [], [], FAKE_FX, FAKE_NOW, cfg);
+
+		expect(result.idleNudge.isDue).toBe(false);
+		expect(result.idleNudge.idleDays).toBe(0);
+	});
+
+	it('R3: lastInputTs=null + nudge fired=true → idle-nudge isDue=false (двойной гейт)', async () => {
+		// Дедуп + гейт null не конфликтуют: даже если fired уже стоит — isDue=false.
+		const cfg = makeSweepCfg(stateDir, { idleNudgeDays: 1 });
+		const nudgeKey = `idle-nudge:2026-06-23`;
+		markFired(stateDir, nudgeKey, FAKE_NOW);
+		const result = await collectFinanceDue([], [], [], FAKE_FX, FAKE_NOW, cfg);
+		expect(result.idleNudge.isDue).toBe(false);
+	});
+
+	// ── cash-survey гейт: нет cash-аккаунта → нет опроса ────────────────────
+
+	it('R4: нет cash-аккаунта (пустой accounts) → cash-survey НЕ предлагается', async () => {
+		// Дефект: без гейта вечерний час (FAKE_NOW=19 MSK) давал isDue=true для всех.
+		// Гейт: hasCashAccount=false → cashSurveyDue=false.
+		const cfg = makeSweepCfg(stateDir);
+		const result = await collectFinanceDue([], [], [], FAKE_FX, FAKE_NOW, cfg, [] /* нет cash */);
+		expect(result.cashSurvey.isDue).toBe(false);
+	});
+
+	it('R5: только не-наличный аккаунт (checking) → cash-survey НЕ предлагается', async () => {
+		// Безнал есть, наличных нет — опрос «сколько наличных» бессмысленен.
+		const cfg = makeSweepCfg(stateDir);
+		const result = await collectFinanceDue([], [], [], FAKE_FX, FAKE_NOW, cfg, [FAKE_CHECKING_ACCOUNT]);
+		expect(result.cashSurvey.isDue).toBe(false);
+	});
+
+	// ── Позитивное поведение: с данными — всё работает как прежде ───────────
+
+	it('P1: есть cash-аккаунт + вечернее время → cash-survey доступен (позитив цел)', async () => {
+		// Инвариант: пользователь с cash-аккаунтом получает опрос налички как прежде.
+		const cfg = makeSweepCfg(stateDir);
+		const result = await collectFinanceDue([], [], [], FAKE_FX, FAKE_NOW, cfg, [FAKE_CASH_ACCOUNT]);
+		expect(result.cashSurvey.isDue).toBe(true);
+	});
+
+	it('P2: lastInputTs в прошлом (>= idleNudgeDays) → idle-nudge доступен (позитив цел)', async () => {
+		// Инвариант: пользователь, который когда-то вводил финансы но давно не обновлял,
+		// по-прежнему получает нудж «обнови данные».
+		const cfg = makeSweepCfg(stateDir, { idleNudgeDays: 5 });
+		// Пишем watermark 10 дней назад.
+		const oldTs = '2026-06-13T12:00:00Z';
+		writeLastInputTs(stateDir, oldTs);
+		const result = await collectFinanceDue([], [], [], FAKE_FX, FAKE_NOW, cfg);
+		expect(result.idleNudge.isDue).toBe(true);
+		expect(result.idleNudge.idleDays).toBeGreaterThanOrEqual(5);
+	});
+
+	it('P3: lastInputTs недавно (<  idleNudgeDays) → idle-nudge НЕ срабатывает (правильно)', async () => {
+		// Ввод недавно — всё хорошо, молчим.
+		const cfg = makeSweepCfg(stateDir, { idleNudgeDays: 7 });
+		const recentTs = '2026-06-21T12:00:00Z'; // 2 дня назад от FAKE_NOW
+		writeLastInputTs(stateDir, recentTs);
+		const result = await collectFinanceDue([], [], [], FAKE_FX, FAKE_NOW, cfg);
+		expect(result.idleNudge.isDue).toBe(false);
+	});
+
+	// ── Сложный сценарий: полный пустой прогон (R1 со всеми параметрами) ────
+
+	it('R6: пустой леджер вечером (19 MSK) → deliverFinanceDue не вызывает ни одного пуша', async () => {
+		// Интеграционный тест: полная цепочка collect → deliver без реальных данных.
+		// Проверяем что pushToOwner и pushPhotoToOwner НЕ вызываются при пустом состоянии.
+		const cfg = makeSweepCfg(stateDir);
+		const pushCalls: string[] = [];
+		const photoCalls: string[] = [];
+
+		const deps = {
+			pushToOwner: async (text: string) => { pushCalls.push(text); },
+			pushPhotoToOwner: async () => { photoCalls.push('called'); },
+			assertNoSecrets: (_text: string) => { /* no-op */ },
+		};
+
+		// Пустой результат: нет данных, вечерний час, без cash-аккаунтов.
+		// Воспроизводит accounts=[] (по умолчанию) и lastInputTs=null.
+		const emptyResult = await collectFinanceDue([], [], [], FAKE_FX, FAKE_NOW, cfg);
+		// emptyResult.cashSurvey.isDue и .idleNudge.isDue оба false (гейты сработали).
+		expect(emptyResult.cashSurvey.isDue).toBe(false);
+		expect(emptyResult.idleNudge.isDue).toBe(false);
+
+		const errors = await deliverFinanceDue(emptyResult, FAKE_NOW, cfg, {}, deps);
+
+		// Ни одного пуша, ни одной ошибки.
+		expect(errors).toBe(0);
+		expect(pushCalls).toHaveLength(0);
+		expect(photoCalls).toHaveLength(0);
 	});
 });
