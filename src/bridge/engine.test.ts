@@ -84,13 +84,29 @@ describe('ClaudeEngine.parseOutput', () => {
 		});
 	});
 
-	it('is_error → бросает транзиентную EngineError', () => {
+	it('is_error → бросает транзиентную EngineError (не-auth)', () => {
 		try {
 			eng.parseOutput('{"is_error":true,"result":"rate limited"}', null);
 			expect.unreachable();
 		} catch (e) {
 			expect(e).toBeInstanceOf(EngineError);
 			expect((e as EngineError).transient).toBe(true);
+			expect((e as EngineError).auth).toBe(false);
+		}
+	});
+
+	it('is_error с 401 → auth-EngineError, НЕ транзиентная (нужен релогин, не retry)', () => {
+		// Так приходит протухший токен CLI: --output-format json, exit 0, is_error в result.
+		const out =
+			'{"is_error":true,"result":"Failed to authenticate. API Error: 401 ' +
+			'{\\"type\\":\\"authentication_error\\",\\"message\\":\\"Invalid authentication credentials\\"}"}';
+		try {
+			eng.parseOutput(out, null);
+			expect.unreachable();
+		} catch (e) {
+			expect(e).toBeInstanceOf(EngineError);
+			expect((e as EngineError).auth).toBe(true);
+			expect((e as EngineError).transient).toBe(false);
 		}
 	});
 
