@@ -18,7 +18,8 @@
 		"lint": "eslint .",
 		"format": "prettier --write \"src/**/*.ts\"",
 		"typecheck": "tsc --noEmit",
-		"test": "vitest run"
+		"test": "vitest run",
+		"finance:smoke": "pnpm build && node scripts/finance-smoke.mjs"
 	},
 	"dependencies": {
 		"@resvg/resvg-js": "^2.6.2",

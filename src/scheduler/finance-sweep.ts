@@ -339,8 +339,13 @@ function isoDateOnly(iso: string): string {
  *   2. Майлстоуны: computeGoalProgress(goal, snapshots, fx, now) для каждой цели.
  *      Если pct пересёк 25/50/75/100 снизу → GoalMilestoneItem.
  *   3. Опрос налички: ~раз в 3 дня вечером (часовой фильтр по UTC-hour).
+ *      ГЕЙТ: предлагается ТОЛЬКО если у пользователя есть хотя бы один счёт kind==='cash'
+ *      (он завёл наличку). Если нет ни одного cash-аккаунта — опрос молчит полностью.
  *      Дедуп: wasFired(stateDir, cashKey) за сутки.
  *   4. Нудж простоя: readLastInputTs → если давно не было ввода.
+ *      ГЕЙТ: нудж срабатывает ТОЛЬКО если lastInputTs !== null (пользователь хоть раз
+ *      вводил финансы). Никогда не вводил → никакого нуджа (не спамим тому, кто
+ *      финансами не пользуется).
  *      Дедуп: wasFired(stateDir, nudgeKey) за сутки.
  *
  * @param credits   — кредиты из ledger.readAll('credits')
@@ -349,6 +354,13 @@ function isoDateOnly(iso: string): string {
  * @param fx        — провайдер курсов (мок или реальный)
  * @param now       — текущий момент (ISO-8601)
  * @param cfg       — конфиг свипа
+ * @param accounts  — описания счетов из ledger.readAll('accounts'); используется для
+ *                    cash-survey гейта (счёт kind==='cash' обязателен). Опционально:
+ *                    если не передан — cash-survey не отправляется (безопасный дефолт).
+ *                    ⚠️ При будущем ПОДКЛЮЧЕНИИ проактива к свипу вызывающий ОБЯЗАН
+ *                    передать accounts = ledger.readAll('accounts'); иначе из-за дефолта []
+ *                    cash-survey будет молча не срабатывать даже у пользователя с наличкой
+ *                    (тихая потеря позитива).
  * @returns FinanceDueResult со всеми due-айтемами (без side-эффектов пушей)
  */
 export async function collectFinanceDue(
@@ -358,6 +370,7 @@ export async function collectFinanceDue(
 	fx: FxProvider,
 	now: string,
 	cfg: FinanceSweepConfig,
+	accounts: AccountRecord[] = [],
 ): Promise<FinanceDueResult> {
 	const nowDate = isoDateOnly(now);
 
@@ -523,6 +536,13 @@ export async function collectFinanceDue(
 	// следующего дня → UTC-дата была бы «завтра», а локальная = «сегодня» (правильно).
 	const nowLocalDate = nowLocal.toFormat('yyyy-MM-dd');
 
+	// ГЕЙТ «нет cash-аккаунта»: опрос налички уместен ТОЛЬКО если пользователь уже
+	// завёл хотя бы один счёт kind==='cash'. Если cash-аккаунтов нет — он финансами
+	// не пользуется (или пользуется только безналом) → опрос молчит полностью.
+	// Это предотвращает спонтанные «Сколько наличных?» тому, кто никогда не вводил
+	// наличные. Позитивное поведение (есть хоть один cash-аккаунт) сохраняется.
+	const hasCashAccount = accounts.some((acc) => acc.kind === 'cash');
+
 	// Ключ дедупа по локальному дню (раз в cashSurveyIntervalDays дней).
 	const cashSurveyKey = `cash-survey:${nowLocalDate}`;
 
@@ -542,7 +562,8 @@ export async function collectFinanceDue(
 		}
 	}
 
-	const cashSurveyDue = !cashSurveyFiredRecently && isEveningHour;
+	// Опрос due ТОЛЬКО при: есть cash-аккаунт + вечерний час + не fired недавно.
+	const cashSurveyDue = hasCashAccount && !cashSurveyFiredRecently && isEveningHour;
 
 	// ── 4. Нудж простоя ───────────────────────────────────────────────────────
 
@@ -558,11 +579,18 @@ export async function collectFinanceDue(
 
 	if (!nudgeFiredToday) {
 		if (lastInputTs === null) {
-			// Никогда не было ввода — считаем максимальный порог.
-			idleDays = cfg.idleNudgeDays + 1;
-			idleNudgeDue = true;
+			// ГЕЙТ «никогда не вводил»: lastInputTs=null означает, что пользователь
+			// ВООБЩЕ НЕ ИСПОЛЬЗУЕТ финансовый модуль (не было ни одной записи).
+			// Отправлять нудж «обнови данные» тому, кто никогда ничего не вводил —
+			// спам и нарушение UX-инварианта «финансы always-on не создают шума».
+			// Решение: нудж НЕ срабатывает при lastInputTs===null.
+			// Когда пользователь ВПЕРВЫЕ введёт финансы (запишет снапшот/транзакцию),
+			// writeLastInputTs запишет watermark → со следующего свипа нудж
+			// заработает в штатном режиме (позитивное поведение сохранено).
+			idleDays = 0;
+			idleNudgeDue = false;
 		} else {
-			// Считаем дни простоя.
+			// Считаем дни простоя от последнего ввода.
 			idleDays = daysBetween(isoDateOnly(lastInputTs), nowDate);
 			idleNudgeDue = idleDays >= cfg.idleNudgeDays;
 		}

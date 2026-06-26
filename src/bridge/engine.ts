@@ -37,11 +37,18 @@ export interface EngineResult {
 /** Транзиентная или фатальная ошибка движка. transient=true → воркер сделает 1 retry. */
 export class EngineError extends Error {
 	readonly transient: boolean;
+	/**
+	 * Сбой аутентификации движка (истёк/невалиден OAuth-токен CLI). Всегда НЕ транзиентный
+	 * (retry бесполезен) — мост по этому флагу шлёт владельцу подсказку про релогин, а не
+	 * generic «движок недоступен».
+	 */
+	readonly auth: boolean;
 
-	constructor(message: string, opts: { transient?: boolean; cause?: unknown } = {}) {
+	constructor(message: string, opts: { transient?: boolean; auth?: boolean; cause?: unknown } = {}) {
 		super(message, opts.cause !== undefined ? { cause: opts.cause } : undefined);
 		this.name = 'EngineError';
 		this.transient = opts.transient ?? false;
+		this.auth = opts.auth ?? false;
 	}
 }
 
@@ -157,6 +164,25 @@ function looksTransient(stderrText: string): boolean {
 	return transient.some((m) => low.includes(m));
 }
 
+/**
+ * Похожа ли ошибка на сбой аутентификации (истёк/невалиден OAuth-токен CLI). Такие
+ * ошибки НЕ транзиентны: retry бесполезен, нужен релогин (`claude` → /login либо
+ * `claude setup-token`). Отдельный класс — чтобы мост слал владельцу внятную подсказку
+ * вместо «движок недоступен или превышен лимит» ([ADR-0009]: токен только у бинаря).
+ */
+function looksAuthFailure(text: string): boolean {
+	const low = text.toLowerCase();
+	return (
+		low.includes('401') ||
+		low.includes('invalid authentication') ||
+		low.includes('authentication_error') ||
+		low.includes('failed to authenticate') ||
+		low.includes('unauthorized') ||
+		low.includes('oauth') ||
+		(low.includes('token') && (low.includes('expired') || low.includes('invalid')))
+	);
+}
+
 /** Общий механизм spawn-fresh-per-task. Адаптеры задают argv + парсинг stdout. */
 abstract class SubprocessEngine implements Engine {
 	timeoutSeconds = 180;
@@ -216,7 +242,11 @@ abstract class SubprocessEngine implements Engine {
 
 		const stderrText = result.stderr.trim();
 		if (result.code !== 0) {
-			const transient = looksTransient(stderrText);
+			// Auth-сбой имеет приоритет над транзиентностью: при пустом stderr (как у claude,
+			// который пишет 401 в stdout-JSON, а не stderr) детектор может не сработать — тогда
+			// auth подхватится в parseOutput по is_error.
+			const auth = looksAuthFailure(stderrText);
+			const transient = !auth && looksTransient(stderrText);
 			// При гибели по сигналу code===null — даём информативный «сигналом SIGXXX»
 			// вместо неинформативного «кодом null» (Python видел returncode=-N).
 			const failedBySignal = result.code === null && result.signal !== null;
@@ -228,11 +258,13 @@ abstract class SubprocessEngine implements Engine {
 					signal: result.signal,
 					stderr: stderrText.slice(0, 500),
 					transient,
+					auth,
 				},
 				'engine.nonzero_exit',
 			);
 			throw new EngineError(`движок завершился ${codeStr}: ${stderrText.slice(0, 300)}`, {
 				transient,
+				auth,
 			});
 		}
 
@@ -344,8 +376,11 @@ export class ClaudeEngine extends SubprocessEngine {
 		const usage = isRecord(payload.usage) ? payload.usage : null;
 
 		if (payload.is_error) {
-			const message = payload.result || payload.error || 'claude вернул is_error';
-			throw new EngineError(String(message), { transient: true });
+			const message = String(payload.result || payload.error || 'claude вернул is_error');
+			// Auth-сбой (401/«Invalid authentication credentials») приходит как is_error с exit 0
+			// — НЕ транзиентно, retry бесполезен, нужен релогин CLI ([ADR-0009]).
+			const auth = looksAuthFailure(message);
+			throw new EngineError(message, { transient: !auth, auth });
 		}
 
 		const answer = typeof payload.result === 'string' ? payload.result : '';

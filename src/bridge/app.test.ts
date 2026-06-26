@@ -228,8 +228,29 @@ describe('extractJob', () => {
 		expect(extractJob({ message: { chat: { id: 7 }, text: 'hi' } }, 42)).toBeNull();
 	});
 	it('не текст / пусто → null', () => {
+		// photo:[] — вырожденный пустой массив (реальное фото всегда непустое) → не медиа.
 		expect(extractJob({ message: { chat: { id: 42 }, photo: [] } }, 42)).toBeNull();
 		expect(extractJob({ message: { chat: { id: 42 }, text: '   ' } }, 42)).toBeNull();
+	});
+
+	it('фото с подписью → Job с текстом подписи (caption-фолбэк)', () => {
+		const update = { message: { chat: { id: 42 }, photo: [{ file_id: 'f1' }], caption: ' опиши опыт ' } };
+		expect(extractJob(update, 42)).toEqual({ chatId: 42, text: 'опиши опыт' });
+	});
+
+	it('текст имеет приоритет над caption', () => {
+		const update = { message: { chat: { id: 42 }, text: 'основной', caption: 'подпись' } };
+		expect(extractJob(update, 42)).toEqual({ chatId: 42, text: 'основной' });
+	});
+
+	it('фото без подписи → mediaOnly-Job (подсказка вместо тихого drop)', () => {
+		const update = { message: { chat: { id: 42 }, photo: [{ file_id: 'f1' }] } };
+		expect(extractJob(update, 42)).toEqual({ chatId: 42, text: '', mediaOnly: true });
+	});
+
+	it('документ без подписи → mediaOnly-Job', () => {
+		const update = { message: { chat: { id: 42 }, document: { file_id: 'd1' } } };
+		expect(extractJob(update, 42)).toEqual({ chatId: 42, text: '', mediaOnly: true });
 	});
 
 	it('callback_query владельца → Job с callback-инфо', () => {
@@ -452,6 +473,132 @@ describe('handleJob — finance-intent диспетчер (ADR-0024)', () => {
 		// Сырой ответ передан без изменений (fenced-блок остался).
 		const lastSent = telegram.sent.at(-1);
 		expect(lastSent?.text).toContain('```finance-intent');
+	});
+});
+
+// ---------------------------------------------------------------------------
+// handleJob — регресс: финансовый реактивный слой не шумит без данных
+// ---------------------------------------------------------------------------
+
+describe('handleJob — регресс: финансы не шумят без finance-intent', () => {
+	it('financeLedger задан, но ответ движка НЕ содержит finance-intent → answer проходит как есть', async () => {
+		// Воспроизводит инвариант: наличие financeLedger в state не означает что каждый ответ
+		// движка перезаписывается. Если extractFinanceIntent(answer)===null → res.answer не меняется.
+		const ledgerDir = mkdtempSync(join(tmpdir(), 'app-no-intent-test-'));
+		try {
+			const financeLedger = new Ledger({
+				financeDir: ledgerDir,
+				publicRepoRoot: join(tmpdir(), 'fake-public-for-no-intent-test'),
+			});
+
+			const plainAnswer = 'Обычный ответ движка без финансового блока. Привет!';
+
+			const settings: Settings = {
+				botToken: 'token',
+				ownerChatId: 42,
+				mode: 'webhook',
+				webhookSecret: SECRET,
+				pollTimeoutSec: 50,
+				dbPath: ':memory:',
+				maxQueue: 2,
+				workers: 1,
+				port: 0,
+			};
+			const engine: Engine = {
+				async run(_prompt, _sessionId) {
+					return { answer: plainAnswer, sessionId: 'sess-plain', usage: null, isError: false };
+				},
+			};
+			const telegram = new FakeTelegram();
+			const store = new SessionStore(settings.dbPath);
+			openStores.push(store);
+
+			// BridgeState с financeLedger — шов активен, но ответ без finance-intent.
+			const state = new BridgeState(settings, engine, store, telegram, undefined, undefined, undefined, financeLedger);
+
+			await handleJob(state, { chatId: 42, text: 'просто поговорить' });
+
+			// Ответ движка НЕ заменяется readback'ом (нет finance-intent).
+			const lastSent = telegram.sent.at(-1);
+			expect(lastSent?.text).toBe(plainAnswer);
+		} finally {
+			rmSync(ledgerDir, { recursive: true, force: true });
+		}
+	});
+
+	it('нефинансовый callback_query (без fin: префикса) → answerCallbackQuery, движок НЕ зовётся', async () => {
+		// Воспроизводит инвариант: не-финансовые callback'и (например кнопки sessions)
+		// идут старым путём — answerCallbackQuery + лог, а не финанс-диспетчером.
+		// Это защита от роутинга произвольных callback_data в финансовый обработчик.
+		const { state, engine, telegram } = makeState();
+
+		await handleJob(state, {
+			chatId: 42,
+			text: 'some:non:financial:callback',
+			callback: { id: 'cbq-nonfin', data: 'some:non:financial:callback', messageId: 55 },
+		});
+
+		// Движок НЕ вызывался (callback → другая ветка).
+		expect(engine.calls).toHaveLength(0);
+		// answerCallbackQuery вызван best-effort (без financeLedger → общий путь).
+		expect(telegram.answeredCallbacks).toContain('cbq-nonfin');
+		// Никаких сообщений не отправлено (только погашение «часиков»).
+		expect(telegram.sent).toHaveLength(0);
+	});
+
+	it('financeLedger ЗАДАН, но callback без fin: префикса → финанс-диспетчер НЕ зовётся (изоляция префикс-гейта)', async () => {
+		// В отличие от теста выше (там financeLedger НЕ задан, и общий путь тривиален),
+		// здесь финансы реально активны — Ledger инъектирован. Проверяем именно префикс-гейт
+		// app.ts: callback_data.startsWith(CALLBACK_PREFIX='fin:'). Произвольный нефинансовый
+		// callback ('some:non:financial') НЕ должен утечь в dispatchFinanceCallback.
+		//
+		// Сигнатура: dispatchFinanceCallback сам зовёт answerCallbackQuery И шлёт сообщение
+		// (ошибка «кредит не найден» / readback). Поэтому если бы гейт протёк — мы увидели бы
+		// tg.sent.length > 0. Старый же путь только гасит «часики» (answerCallbackQuery) без
+		// единого sendMessage — на этом и ловим, что диспетчер не вызвался.
+		const ledgerDir = mkdtempSync(join(tmpdir(), 'app-prefix-gate-test-'));
+		try {
+			const financeLedger = new Ledger({
+				financeDir: ledgerDir,
+				publicRepoRoot: join(tmpdir(), 'fake-public-for-prefix-gate-test'),
+			});
+
+			const settings: Settings = {
+				botToken: 'token',
+				ownerChatId: 42,
+				mode: 'webhook',
+				webhookSecret: SECRET,
+				pollTimeoutSec: 50,
+				dbPath: ':memory:',
+				maxQueue: 2,
+				workers: 1,
+				port: 0,
+			};
+			const engine = new FakeEngine();
+			const tg = new FakeTelegram();
+			const store = new SessionStore(settings.dbPath);
+			openStores.push(store);
+
+			// BridgeState с financeLedger — финансовый диспетчер активен (восьмой аргумент).
+			const state = new BridgeState(settings, engine, store, tg, undefined, undefined, undefined, financeLedger);
+
+			// Нефинансовый callback (нет 'fin:' префикса) при активных финансах.
+			await handleJob(state, {
+				chatId: 42,
+				text: 'some:non:financial',
+				callback: { id: 'cbq-prefix-gate', data: 'some:non:financial', messageId: 77 },
+			});
+
+			// Движок НЕ зван (callback → не текстовый ход движка).
+			expect(engine.calls).toHaveLength(0);
+			// Старый путь: «часики» погашены через answerCallbackQuery.
+			expect(tg.answeredCallbacks).toContain('cbq-prefix-gate');
+			// Префикс-гейт сработал: финанс-диспетчер НЕ вызывался → ни одного sendMessage
+			// (диспетчер всегда что-то шлёт; общий путь — нет). Это и изолирует именно гейт.
+			expect(tg.sent).toHaveLength(0);
+		} finally {
+			rmSync(ledgerDir, { recursive: true, force: true });
+		}
 	});
 });
 
