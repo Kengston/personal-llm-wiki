@@ -62,6 +62,11 @@ export interface Job {
 	text: string;
 	/** Присутствует, если джоба — нажатие инлайн-кнопки (а не сообщение). */
 	callback?: CallbackInfo;
+	/**
+	 * Медиа (фото/файл/голосовое) БЕЗ текста и подписи: содержимое мост пока не читает
+	 * (нужен отдельный vision-путь с PII-маскировкой). Воркер отвечает подсказкой, а не молчит.
+	 */
+	mediaOnly?: boolean;
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -159,10 +164,31 @@ export function extractJob(update: Record<string, unknown>, ownerChatId: number)
 		return null;
 	}
 
-	const text = message.text;
-	if (typeof text !== 'string' || !text.trim()) return null;
+	// Текст хода: обычный текст ИЛИ подпись к медиа. Telegram кладёт текст, сопровождающий
+	// фото/документ, в message.caption (НЕ message.text) — без этого фолбэка сообщения с фото
+	// молча терялись (диагностика 2026-06-26). Подпись — текст → пройдёт обычный sanitize.
+	const rawText =
+		typeof message.text === 'string'
+			? message.text
+			: typeof message.caption === 'string'
+				? message.caption
+				: '';
+	const text = rawText.trim();
+	if (text) return { chatId, text };
 
-	return { chatId, text: text.trim() };
+	// Медиа без подписи (фото/документ/видео/голосовое/стикер): содержимое мост пока не читает
+	// (vision-путь с PII-маскировкой не спроектирован — нужен ADR). Помечаем mediaOnly →
+	// воркер ответит понятной подсказкой вместо тихого drop (бот выглядел «мёртвым» на скрины).
+	const hasMedia =
+		(Array.isArray(message.photo) && message.photo.length > 0) ||
+		isRecord(message.document) ||
+		isRecord(message.video) ||
+		isRecord(message.voice) ||
+		isRecord(message.audio) ||
+		isRecord(message.sticker);
+	if (hasMedia) return { chatId, text: '', mediaOnly: true };
+
+	return null;
 }
 
 /**
@@ -217,6 +243,18 @@ export async function handleJob(state: BridgeState, job: Job): Promise<void> {
 	// Нажатие инлайн-кнопки ([ADR-0023]) — отдельная ветка ДО текстовой обработки.
 	if (job.callback) {
 		await handleCallbackQuery(state, job, job.callback);
+		return;
+	}
+
+	// Медиа без текста/подписи: содержимое (картинку/файл) мост пока не читает — нужен
+	// vision-путь с PII-маскировкой (картинка минует текстовый sanitizer). Внятная подсказка
+	// вместо молчания: добавить подпись или прислать текстом.
+	if (job.mediaOnly) {
+		await state.telegram.sendMessage(
+			job.chatId,
+			'Картинки и файлы я пока не читаю. Пришли текстом или добавь подпись к фото — ' +
+				'подпись я обработаю как обычное сообщение.',
+		);
 		return;
 	}
 

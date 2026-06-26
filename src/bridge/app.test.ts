@@ -228,8 +228,29 @@ describe('extractJob', () => {
 		expect(extractJob({ message: { chat: { id: 7 }, text: 'hi' } }, 42)).toBeNull();
 	});
 	it('не текст / пусто → null', () => {
+		// photo:[] — вырожденный пустой массив (реальное фото всегда непустое) → не медиа.
 		expect(extractJob({ message: { chat: { id: 42 }, photo: [] } }, 42)).toBeNull();
 		expect(extractJob({ message: { chat: { id: 42 }, text: '   ' } }, 42)).toBeNull();
+	});
+
+	it('фото с подписью → Job с текстом подписи (caption-фолбэк)', () => {
+		const update = { message: { chat: { id: 42 }, photo: [{ file_id: 'f1' }], caption: ' опиши опыт ' } };
+		expect(extractJob(update, 42)).toEqual({ chatId: 42, text: 'опиши опыт' });
+	});
+
+	it('текст имеет приоритет над caption', () => {
+		const update = { message: { chat: { id: 42 }, text: 'основной', caption: 'подпись' } };
+		expect(extractJob(update, 42)).toEqual({ chatId: 42, text: 'основной' });
+	});
+
+	it('фото без подписи → mediaOnly-Job (подсказка вместо тихого drop)', () => {
+		const update = { message: { chat: { id: 42 }, photo: [{ file_id: 'f1' }] } };
+		expect(extractJob(update, 42)).toEqual({ chatId: 42, text: '', mediaOnly: true });
+	});
+
+	it('документ без подписи → mediaOnly-Job', () => {
+		const update = { message: { chat: { id: 42 }, document: { file_id: 'd1' } } };
+		expect(extractJob(update, 42)).toEqual({ chatId: 42, text: '', mediaOnly: true });
 	});
 
 	it('callback_query владельца → Job с callback-инфо', () => {
