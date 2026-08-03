@@ -19,8 +19,12 @@ import { z } from 'zod';
 
 import { childLogger } from '../core/logger.js';
 import {
+	applyCompanyGates,
 	companyIdFromDomain,
+	dedupeCompanies,
+	explainRank,
 	normalizeDomain,
+	sourceCoverageLine,
 	type CompanyRecord,
 } from '../ingest/jobsearch/companies.js';
 import {
@@ -265,11 +269,41 @@ function runJobsearchQuery(
 	deps: JobsearchDispatchDeps,
 ): string {
 	if (what === 'companies') {
-		const companies = deps.ledger.readAll('companies');
-		if (companies.length === 0) return 'Компаний пока нет.';
-		return `Компании (${companies.length}):\n${companies
-			.map((c) => `${c.id} — ${c.name}, вес ${c.fit_rank}`)
-			.join('\n')}`;
+		const companies = dedupeCompanies(deps.ledger.readAll('companies'));
+		if (companies.length === 0) {
+			return `Компаний пока нет.\n${sourceCoverageLine([], 0)}`;
+		}
+
+		// Гейты отсекают, ранг ранжирует — два РАЗНЫХ механизма, и смешивать их в одно
+		// число нельзя ([ADR-0029] §4). Отсеянные не исчезают: они перечисляются отдельно
+		// с причиной, потому что «список стал короче» без объяснения — это потеря, а не отбор.
+		const gated = companies.map((c) => ({ company: c, gate: applyCompanyGates(c) }));
+		const passing = gated
+			.filter((g) => g.gate.passed)
+			.sort(
+				(a, b) =>
+					b.company.fit_rank - a.company.fit_rank || a.company.id.localeCompare(b.company.id),
+			);
+		const filtered = gated.filter((g) => !g.gate.passed);
+
+		const lines = [`Компании (${passing.length} из ${companies.length}):`];
+		for (const { company } of passing) {
+			lines.push(`${company.id} — ${company.name} · ${explainRank(company)}`);
+		}
+		if (filtered.length > 0) {
+			lines.push('', `Отсеяно (${filtered.length}):`);
+			for (const { company, gate } of filtered) {
+				lines.push(`${company.id} — ${gate.reasons.join(', ')}`);
+			}
+		}
+
+		// Оговорка о покрытии — одна строка-шаблон в коде, а не редполитика (D11).
+		// Подключённые источники считаются ИЗ ДАННЫХ: канал, который ничего не принёс,
+		// подключённым не считается, сколько бы кода под него ни было написано.
+		const connected = [...new Set(companies.map((c) => c.provenance.company_source))].sort();
+		lines.push('', sourceCoverageLine(connected, passing.length));
+
+		return lines.join('\n');
 	}
 
 	const applications = deps.ledger.readAll('applications');
