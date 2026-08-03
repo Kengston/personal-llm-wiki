@@ -18,18 +18,19 @@ import Fastify, { type FastifyInstance } from 'fastify';
 
 import { childLogger } from '../core/logger.js';
 import { failClosedSanitize, SanitizerError } from '../ingest/sanitizer.js';
-import { Ledger } from '../ingest/finance/ledger.js';
+import type { CareerLedger } from '../ingest/career/store.js';
+import type { JobsearchLedger } from '../ingest/jobsearch/ledger.js';
+import type { FinanceLedger } from '../ingest/finance/ledger.js';
+import { dispatchCareerCallback } from './career-callbacks.js';
+import { dispatchCareerIntent, formatCareerReadback } from './career-intent-dispatch.js';
+import { CAREER_CALLBACK_PREFIX } from './career-intent-query.js';
+import { extractCareerIntent } from './career-intent-schema.js';
+import { dispatchJobsearchCallback, JOBSEARCH_CALLBACK_PREFIX } from './jobsearch-callbacks.js';
+import { dispatchJobsearchIntent, extractJobsearchIntent } from './jobsearch-intent.js';
 import type { Settings } from './config.js';
 import { type Engine, EngineError, type EngineResult } from './engine.js';
-import {
-	dispatchFinanceIntent,
-	extractFinanceIntent,
-	formatReadback,
-} from './finance-intent.js';
-import {
-	CALLBACK_PREFIX,
-	dispatchFinanceCallback,
-} from './finance-callbacks.js';
+import { dispatchFinanceIntent, extractFinanceIntent, formatReadback } from './finance-intent.js';
+import { CALLBACK_PREFIX, dispatchFinanceCallback } from './finance-callbacks.js';
 import { AsyncQueue, Mutex, QueueFull } from './queue.js';
 import {
 	findSession,
@@ -41,7 +42,7 @@ import {
 	type SessionsConfig,
 } from './sessions.js';
 import type { SessionStore } from './store.js';
-import type { TelegramClient } from './telegram.js';
+import type { ReplyMarkup, TelegramClient } from './telegram.js';
 import { commitIfDirty } from './writeback.js';
 
 const log = childLogger('bridge.app');
@@ -81,6 +82,55 @@ function safeEqual(a: string, b: string): boolean {
 	return timingSafeEqual(ba, bb);
 }
 
+/**
+ * BridgeDeps — зависимости моста ИМЕНОВАННЫМИ полями.
+ *
+ * Раньше это был позиционный список на десять аргументов, и вызов выглядел как
+ * `new BridgeState(settings, engine, store, tg, undefined, undefined, undefined, ledger)`:
+ * четыре опциональных слота подряд, и добавление одиннадцатого сделало бы его только хуже.
+ * Именованные поля убирают и счёт `undefined`, и вопрос «а какой это по счёту».
+ */
+export interface BridgeDeps {
+	settings: Settings;
+	engine: Engine;
+	store: SessionStore;
+	telegram: TelegramClient;
+	wikiRepoPath?: string;
+	/**
+	 * Полоса локальных сессий Claude Code ([ADR-0017]). Опциональна: фича включается
+	 * только при SESSIONS_ENABLED=1 + непустом allowlist. resumeEngineFor строит движок
+	 * под cwd конкретного проекта (без персоны вики) для `/resume`.
+	 */
+	sessions?: SessionsConfig;
+	resumeEngineFor?: (projectPath: string) => Engine;
+	/**
+	 * financeLedger — леджер финансового диспетчера ([ADR-0024]).
+	 * Не задан → finance-intent не диспетчеризуется.
+	 */
+	financeLedger?: FinanceLedger;
+	/** Каталог страниц finance-goal (wiki/finance/goals/). Не задан → страницы не пишутся. */
+	financeGoalsDir?: string;
+	/**
+	 * Каталог мутабельного состояния финансового проактива (.finance-state/).
+	 * Не задан → pending-cash-survey и idle-nudge пропускаются (graceful).
+	 */
+	financeStateDir?: string;
+	/**
+	 * careerLedger — леджер карьерной базы ([ADR-0028]).
+	 * Не задан → career-intent не диспетчеризуется и кнопки правки не работают.
+	 */
+	careerLedger?: CareerLedger;
+	/**
+	 * jobsearchLedger — леджер воронки откликов ([ADR-0030]).
+	 * Не задан → jobsearch-intent не диспетчеризуется и кнопки follow-up не работают.
+	 */
+	jobsearchLedger?: JobsearchLedger;
+	/** Каталог состояния проактива — нужен кнопке «Отложить». */
+	jobsearchStateDir?: string;
+	/** Источник времени для диспетчеров. По умолчанию — системные часы. */
+	nowFn?: () => Date;
+}
+
 /** Собранные на старте зависимости моста + примитивы конкуренции. */
 export class BridgeState {
 	readonly queue: AsyncQueue<Job>;
@@ -88,37 +138,37 @@ export class BridgeState {
 	private readonly chatLocks = new Map<number, Mutex>();
 	stopping = false;
 
-	constructor(
-		readonly settings: Settings,
-		readonly engine: Engine,
-		readonly store: SessionStore,
-		readonly telegram: TelegramClient,
-		readonly wikiRepoPath?: string,
-		// Полоса локальных сессий Claude Code ([ADR-0017]). Опциональны: фича включается
-		// только при SESSIONS_ENABLED=1 + непустом allowlist. resumeEngineFor строит движок
-		// под cwd конкретного проекта (без персоны вики) для `/resume`.
-		readonly sessions?: SessionsConfig,
-		readonly resumeEngineFor?: (projectPath: string) => Engine,
-		/**
-		 * financeLedger — экземпляр Ledger для финансового диспетчера (ADR-0024).
-		 * Опционально: если не задан, finance-intent диспетчеризация не производится.
-		 * Создаётся в main.ts при наличии FINANCE_RAW_DIR / CONTENT_ROOT в окружении.
-		 */
-		readonly financeLedger?: Ledger,
-		/**
-		 * financeGoalsDir — каталог для страниц finance-goal (wiki/finance/goals/).
-		 * Опционально: если не задан, create_goal не пишет страницы (только логирует).
-		 */
-		readonly financeGoalsDir?: string,
-		/**
-		 * financeStateDir — каталог мутабельного состояния финансового проактива
-		 * (.finance-state/ в приватном репо). Нужен для pending-cash-survey и
-		 * last-input watermark. Опционально: если не задан, оба механизма пропускаются
-		 * (graceful). Создаётся в main.ts через resolveFinanceStateDir().
-		 */
-		readonly financeStateDir?: string,
-	) {
-		this.queue = new AsyncQueue<Job>(settings.maxQueue);
+	readonly settings: Settings;
+	readonly engine: Engine;
+	readonly store: SessionStore;
+	readonly telegram: TelegramClient;
+	readonly wikiRepoPath?: string;
+	readonly sessions?: SessionsConfig;
+	readonly resumeEngineFor?: (projectPath: string) => Engine;
+	readonly financeLedger?: FinanceLedger;
+	readonly financeGoalsDir?: string;
+	readonly financeStateDir?: string;
+	readonly careerLedger?: CareerLedger;
+	readonly jobsearchLedger?: JobsearchLedger;
+	readonly jobsearchStateDir?: string;
+	readonly nowFn: () => Date;
+
+	constructor(deps: BridgeDeps) {
+		this.settings = deps.settings;
+		this.engine = deps.engine;
+		this.store = deps.store;
+		this.telegram = deps.telegram;
+		this.wikiRepoPath = deps.wikiRepoPath;
+		this.sessions = deps.sessions;
+		this.resumeEngineFor = deps.resumeEngineFor;
+		this.financeLedger = deps.financeLedger;
+		this.financeGoalsDir = deps.financeGoalsDir;
+		this.financeStateDir = deps.financeStateDir;
+		this.careerLedger = deps.careerLedger;
+		this.jobsearchLedger = deps.jobsearchLedger;
+		this.jobsearchStateDir = deps.jobsearchStateDir;
+		this.nowFn = deps.nowFn ?? (() => new Date());
+		this.queue = new AsyncQueue<Job>(deps.settings.maxQueue);
 	}
 
 	/** Lock single-flight для чата (создаётся лениво). */
@@ -216,7 +266,8 @@ function extractCallbackJob(
 	const message = isRecord(callbackQuery.message) ? callbackQuery.message : null;
 	const chat = message && isRecord(message.chat) ? message.chat : null;
 	const chatId = chat && typeof chat.id === 'number' ? chat.id : ownerChatId;
-	const messageId = message && typeof message.message_id === 'number' ? message.message_id : undefined;
+	const messageId =
+		message && typeof message.message_id === 'number' ? message.message_id : undefined;
 
 	return { chatId, text: data, callback: { id, data, messageId } };
 }
@@ -294,6 +345,10 @@ export async function handleJob(state: BridgeState, job: Job): Promise<void> {
 	// «печатает…» сразу — маскирует латентность движка.
 	await state.telegram.sendChatAction(job.chatId, 'typing');
 
+	// Клавиатура структурной правки карьерной базы (D1): собирается диспетчером внутри
+	// lock'а, отправляется вместе с ответом снаружи.
+	let careerKeyboard: ReplyMarkup | undefined;
+
 	// single-flight на chat_id: возвращаем результат, отправку делаем ВНЕ lock'а.
 	// Сообщение владельца идёт движку ЧИСТЫМ user-турном; персона/роутинг — в системном
 	// промпте моста (ADR-0016), а не в тексте.
@@ -333,12 +388,19 @@ export async function handleJob(state: BridgeState, job: Job): Promise<void> {
 		}
 		if (res.sessionId) state.store.upsertSession(job.chatId, res.sessionId);
 
-		// ADR-0024 (finance-intent): если движок эмитил finance-intent блок —
-		// детерминированно диспетчеризуем в чистые функции (record/query/goal).
-		// Readback формируется детерминированно (без LLM). При ошибке диспетчера
-		// — логируем и пропускаем (ответ движка отдаётся как есть, не ронять ход).
+		// Интент-блоки движка ([ADR-0024] finance, [ADR-0028] career): детерминированно
+		// диспетчеризуем в чистые функции, readback собираем без LLM.
+		//
+		// ОБА экстрактора читают ОРИГИНАЛЬНЫЙ ответ (`engineAnswer`), а не `res.answer`.
+		// Раньше финансовый readback ЗАМЕЩАЛ ответ целиком — и при двух блоках в одном
+		// ходе второй интент терялся молча вместе с текстом, в котором он лежал. Блоки
+		// помечены разными тегами (```finance-intent / ```career-intent), перехватить друг
+		// друга они не могут, поэтому применяются оба, а readback'и склеиваются по порядку.
+		const engineAnswer = res.answer;
+		const readbacks: string[] = [];
+
 		if (state.financeLedger) {
-			const intent = extractFinanceIntent(res.answer);
+			const intent = extractFinanceIntent(engineAnswer);
 			if (intent) {
 				try {
 					const dispatchResult = await dispatchFinanceIntent(intent, {
@@ -348,11 +410,8 @@ export async function handleJob(state: BridgeState, job: Job): Promise<void> {
 						// Если не задан — оба механизма пропускаются gracefully.
 						financeStateDir: state.financeStateDir,
 					});
-					// Детерминированный readback заменяет ответ движка (или дополняет его).
-					// Используем readback как основной текст: он содержит актуальные балансы.
 					const readback = formatReadback(dispatchResult);
-					// Сохраняем session_id из оригинального ответа; заменяем только answer.
-					res = { ...res, answer: readback };
+					readbacks.push(readback);
 					log.info(
 						{ intentType: intent.type, readbackChars: readback.length },
 						'finance-intent.dispatched',
@@ -363,6 +422,51 @@ export async function handleJob(state: BridgeState, job: Job): Promise<void> {
 				}
 			}
 		}
+
+		if (state.careerLedger) {
+			const intent = extractCareerIntent(engineAnswer);
+			if (intent) {
+				try {
+					const dispatchResult = dispatchCareerIntent(intent, {
+						ledger: state.careerLedger,
+						nowFn: state.nowFn,
+					});
+					const readback = formatCareerReadback(dispatchResult);
+					readbacks.push(readback);
+					// Клавиатуру правки (D1) шлём отдельным сообщением: она принадлежит
+					// карьерному списку, а не общему readback'у соседнего модуля.
+					careerKeyboard = dispatchResult.query?.keyboard;
+					log.info({ intentType: intent.type, ok: dispatchResult.ok }, 'career-intent.dispatched');
+				} catch (err) {
+					log.warn({ err: String(err), intentType: intent.type }, 'career-intent.dispatch_failed');
+				}
+			}
+		}
+
+		if (state.jobsearchLedger) {
+			const intent = extractJobsearchIntent(engineAnswer);
+			if (intent) {
+				try {
+					const dispatchResult = dispatchJobsearchIntent(intent, {
+						ledger: state.jobsearchLedger,
+						nowFn: state.nowFn,
+					});
+					readbacks.push(dispatchResult.text);
+					log.info(
+						{ intentType: intent.type, ok: dispatchResult.ok },
+						'jobsearch-intent.dispatched',
+					);
+				} catch (err) {
+					log.warn(
+						{ err: String(err), intentType: intent.type },
+						'jobsearch-intent.dispatch_failed',
+					);
+				}
+			}
+		}
+
+		// Readback содержит актуальные числа и то, что реально записано, — он и есть ответ.
+		if (readbacks.length > 0) res = { ...res, answer: readbacks.join('\n\n') };
 
 		// ADR-0015 R1: движок мог дописать вику (capture) → коммитит ДОВЕРЕННЫЙ мост (НЕ
 		// LLM-инструмент), если дерево «грязное». Query-ход дерево не меняет → коммита нет.
@@ -377,7 +481,9 @@ export async function handleJob(state: BridgeState, job: Job): Promise<void> {
 	if (!result) return;
 
 	// Сеть к Telegram не держит сессию (отправка вне lock'а).
-	await state.telegram.sendMessage(job.chatId, result.answer);
+	await state.telegram.sendMessage(job.chatId, result.answer, {
+		...(careerKeyboard ? { replyMarkup: careerKeyboard } : {}),
+	});
 	log.info(
 		{ chatId: job.chatId, usage: result.usage, answerChars: result.answer.length },
 		'job.done',
@@ -401,11 +507,7 @@ export async function handleJob(state: BridgeState, job: Job): Promise<void> {
  * поэтому failClosedSanitize здесь не нужен. Если в будущем callback_data будет
  * передаваться движку — маскировать ОБЯЗАТЕЛЬНО ([ADR-0015]).
  */
-async function handleCallbackQuery(
-	state: BridgeState,
-	job: Job,
-	cb: CallbackInfo,
-): Promise<void> {
+async function handleCallbackQuery(state: BridgeState, job: Job, cb: CallbackInfo): Promise<void> {
 	log.info({ chatId: job.chatId, data: cb.data, messageId: cb.messageId }, 'callback.received');
 
 	// Финансовые кнопки ([ADR-0024]): кнопочные флоу кредит-напоминаний.
@@ -427,7 +529,54 @@ async function handleCallbackQuery(
 		return;
 	}
 
-	// Остальные (не-финансовые) callback'и или финансовые при отключённом ledger:
+	// Карьерные кнопки ([ADR-0028], D1): включить/исключить достижение в варианте.
+	// dispatchCareerCallback сам гасит «часики», проверяет owner-гейт и переписывает
+	// сообщение со списком на месте.
+	if (cb.data.startsWith(CAREER_CALLBACK_PREFIX) && state.careerLedger) {
+		await dispatchCareerCallback(
+			{
+				chatId: job.chatId,
+				fromId: job.chatId, // В приватном чате from.id == chat.id == owner (ADR-0009).
+				callbackQueryId: cb.id,
+				data: cb.data,
+				messageId: cb.messageId,
+			},
+			{
+				ownerChatId: state.settings.ownerChatId,
+				telegram: state.telegram,
+				ledger: state.careerLedger,
+				nowFn: state.nowFn,
+			},
+		);
+		return;
+	}
+
+	// Кнопки проактива воронки ([ADR-0030]): [Написал] / [Отложить] / [Считать игнором].
+	if (
+		cb.data.startsWith(JOBSEARCH_CALLBACK_PREFIX) &&
+		state.jobsearchLedger &&
+		state.jobsearchStateDir
+	) {
+		await dispatchJobsearchCallback(
+			{
+				chatId: job.chatId,
+				fromId: job.chatId, // В приватном чате from.id == chat.id == owner (ADR-0009).
+				callbackQueryId: cb.id,
+				data: cb.data,
+				messageId: cb.messageId,
+			},
+			{
+				ownerChatId: state.settings.ownerChatId,
+				telegram: state.telegram,
+				ledger: state.jobsearchLedger,
+				stateDir: state.jobsearchStateDir,
+				nowFn: state.nowFn,
+			},
+		);
+		return;
+	}
+
+	// Остальные callback'и или интентные при отключённом ledger:
 	// гасим «часики» best-effort и логируем.
 	await state.telegram.answerCallbackQuery(cb.id);
 }
@@ -478,7 +627,10 @@ async function handleSessionCommand(state: BridgeState, job: Job): Promise<void>
 	if (cmd === '/session') {
 		const id = firstToken(text.slice(cmd.length));
 		if (!id) {
-			await state.telegram.sendMessage(job.chatId, 'Использование: /session <id>. Список: /sessions');
+			await state.telegram.sendMessage(
+				job.chatId,
+				'Использование: /session <id>. Список: /sessions',
+			);
 			return;
 		}
 		const { meta, ambiguous } = findSession(cfg, id);

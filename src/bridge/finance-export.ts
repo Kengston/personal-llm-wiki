@@ -35,7 +35,7 @@
 
 import { childLogger } from '../core/logger.js';
 import { chartSpec, type BalanceEntry } from '../ingest/finance/chart.js';
-import { Ledger } from '../ingest/finance/ledger.js';
+import type { FinanceLedger } from '../ingest/finance/ledger.js';
 import type { AccountRecord, SnapshotRecord, TransactionRecord } from '../ingest/finance/types.js';
 import { renderChartPng } from './finance-render.js';
 import type { TelegramClient } from './telegram.js';
@@ -328,7 +328,7 @@ export function buildAccountsTablePng(rows: AccountBalanceRow[]): Buffer | null 
 /**
  * sendTransactionsCsv — тонкий адаптер: читает транзакции из леджера и отправляет CSV.
  *
- * Шаги: Ledger.readAll('transactions') → buildTransactionsCsv → Buffer → sendDocument.
+ * Шаги: FinanceLedger.readAll('transactions') → buildTransactionsCsv → Buffer → sendDocument.
  * Best-effort для Telegram: ошибка отправки логируется, бросается дальше (вызывающий решает).
  *
  * Secret-gate (ADR-0011): caption без точных чисел («транзакции за период»),
@@ -341,7 +341,7 @@ export function buildAccountsTablePng(rows: AccountBalanceRow[]): Buffer | null 
  * @returns количество отправленных транзакций в CSV (для тестов)
  */
 export async function sendTransactionsCsv(
-	ledger: Ledger,
+	ledger: FinanceLedger,
 	tg: TelegramClient,
 	chatId: number,
 	nowFn: () => Date = () => new Date(),
@@ -376,7 +376,7 @@ export async function sendTransactionsCsv(
 /**
  * sendAccountsTable — тонкий адаптер: читает балансы из леджера и отправляет PNG-сводку счетов.
  *
- * Шаги: Ledger.readAll('snapshots') + readAll('accounts') →
+ * Шаги: FinanceLedger.readAll('snapshots') + readAll('accounts') →
  *   buildAccountBalanceRows → buildAccountsTablePng → Buffer → sendDocument.
  *
  * Если данных нет (пустой леджер или нет снапшотов) — отправляет текстовое сообщение
@@ -391,7 +391,7 @@ export async function sendTransactionsCsv(
  * @returns true если PNG отправлен, false если данных не было
  */
 export async function sendAccountsTable(
-	ledger: Ledger,
+	ledger: FinanceLedger,
 	tg: TelegramClient,
 	chatId: number,
 	nowFn: () => Date = () => new Date(),

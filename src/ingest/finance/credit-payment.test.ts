@@ -18,7 +18,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { Ledger } from './ledger.js';
+import { createLedger, type FinanceLedger } from './ledger.js';
 import type { CreditRecord } from './types.js';
 import { recordCreditPayment } from './credit-payment.js';
 import { splitPayment } from './credit.js';
@@ -63,13 +63,13 @@ const SYNTHETIC_CREDIT_NO_MONTHLY: CreditRecord = {
 
 let ledgerDir: string;
 let publicFakeDir: string;
-let ledger: Ledger;
+let ledger: FinanceLedger;
 
 beforeEach(() => {
 	// Создаём изолированный temp-dir для каждого теста.
 	ledgerDir = mkdtempSync(join(tmpdir(), 'credit-payment-test-'));
 	publicFakeDir = mkdtempSync(join(tmpdir(), 'fake-public-'));
-	ledger = new Ledger({ financeDir: ledgerDir, publicRepoRoot: publicFakeDir });
+	ledger = createLedger({ dir: ledgerDir, publicRepoRoot: publicFakeDir });
 });
 
 afterEach(() => {
@@ -238,7 +238,7 @@ describe('recordCreditPayment — транзакция в леджере', () =>
 
 		// Для второго вызова нужен новый кредит (первый уже погашен на 1200).
 		// Создаём новый ledger с тем же кредитом, но другим id.
-		const ledger2 = new Ledger({ financeDir: mkdtempSync(join(tmpdir(), 'credit-tx-test-')), publicRepoRoot: publicFakeDir });
+		const ledger2 = createLedger({ dir: mkdtempSync(join(tmpdir(), 'credit-tx-test-')), publicRepoRoot: publicFakeDir });
 		const creditCopy: CreditRecord = { ...SYNTHETIC_CREDIT, id: 'synthetic-credit-001' };
 		ledger2.append('credits', creditCopy);
 
@@ -249,7 +249,7 @@ describe('recordCreditPayment — транзакция в леджере', () =>
 
 		expect(r2.txId).toBe(txId1);
 		// Cleanup
-		rmSync((ledger2 as unknown as { financeDir: string }).financeDir, { recursive: true, force: true });
+		rmSync((ledger2 as unknown as { dir: string }).dir, { recursive: true, force: true });
 	});
 });
 
@@ -296,13 +296,13 @@ describe('recordCreditPayment — path-guard', () => {
 		expect(ledger.readAll('transactions')).toHaveLength(1);
 	});
 
-	it('path-guard: Ledger с неверным publicRepoRoot бросает LedgerPathError при записи транзакции', () => {
+	it('path-guard: FinanceLedger с неверным publicRepoRoot бросает LedgerPathError при записи транзакции', () => {
 		// Сначала записываем кредит в ХОРОШИЙ ledger (нормальный publicRepoRoot).
 		ledger.append('credits', SYNTHETIC_CREDIT);
 
 		// Создаём ledger2 с тем же financeDir, но с publicRepoRoot = ledgerDir → запись ЗАПРЕЩЕНА.
-		const badLedger = new Ledger({
-			financeDir: ledgerDir,
+		const badLedger = createLedger({
+			dir: ledgerDir,
 			publicRepoRoot: ledgerDir, // ← financeDir совпадает с publicRepoRoot → LedgerPathError
 		});
 		// Кредит уже записан в ledgerDir (goodLedger), badLedger может его прочитать.

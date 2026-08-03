@@ -23,7 +23,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { Ledger } from '../ingest/finance/ledger.js';
+import { createLedger, type FinanceLedger } from '../ingest/finance/ledger.js';
 import { recordFinanceEntry } from '../ingest/finance/record.js';
 import type { AccountRecord, SnapshotRecord, TransactionRecord } from '../ingest/finance/types.js';
 import type { TelegramClient, InputFile, SendMediaOptions } from './telegram.js';
@@ -46,10 +46,10 @@ const FAKE_NOW = new Date('2026-06-23T10:00:00Z');
 const fakeNowFn = () => FAKE_NOW;
 
 /** Создаёт Ledger в tmp-каталоге с отключённым path-guard. */
-function makeTmpLedger(): { ledger: Ledger; dir: string } {
+function makeTmpLedger(): { ledger: FinanceLedger; dir: string } {
 	const dir = mkdtempSync(join(tmpdir(), 'finance-export-test-'));
-	const ledger = new Ledger({
-		financeDir: dir,
+	const ledger = createLedger({
+		dir: dir,
 		publicRepoRoot: join(tmpdir(), 'fake-public-repo-export'),
 	});
 	return { ledger, dir };
@@ -84,6 +84,8 @@ function makeMockTelegramClient() {
 			sentDocuments.push({ chatId, doc, opts });
 		}),
 		answerCallbackQuery: vi.fn(async () => {}),
+		editMessageText: vi.fn(async () => {}),
+		editMessageReplyMarkup: vi.fn(async () => {}),
 		sendChatAction: vi.fn(async () => {}),
 		getMe: vi.fn(async () => ({})),
 		getUpdates: vi.fn(async () => []),
@@ -480,7 +482,7 @@ describe('buildAccountsTablePng', () => {
 
 describe('sendTransactionsCsv', () => {
 	let dir: string;
-	let ledger: Ledger;
+	let ledger: FinanceLedger;
 
 	beforeEach(() => {
 		const tmp = makeTmpLedger();
@@ -568,7 +570,7 @@ describe('sendTransactionsCsv', () => {
 
 describe('sendAccountsTable', () => {
 	let dir: string;
-	let ledger: Ledger;
+	let ledger: FinanceLedger;
 
 	beforeEach(() => {
 		const tmp = makeTmpLedger();
@@ -651,12 +653,12 @@ describe('sendAccountsTable', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 8. E2E: Ledger → buildTransactionsCsv детерминизм при полном цикле записи
+// 8. E2E: FinanceLedger → buildTransactionsCsv детерминизм при полном цикле записи
 // ---------------------------------------------------------------------------
 
 describe('E2E детерминизм CSV при записи через Ledger', () => {
 	let dir: string;
-	let ledger: Ledger;
+	let ledger: FinanceLedger;
 
 	beforeEach(() => {
 		const tmp = makeTmpLedger();

@@ -184,8 +184,207 @@ goal_id бери из списка активных целей в финансо
  *                          null если леджер пустой или недоступен
  * @returns расширенная персона с инструкцией и (опционально) финансовым контекстом
  */
-export function appendFinanceInstruction(persona: string, financeContext: string | null = null): string {
+export function appendFinanceInstruction(
+	persona: string,
+	financeContext: string | null = null,
+): string {
 	// Контекст (балансы, net-worth) подаётся первым — движок получает данные ДО инструкции.
 	const contextBlock = financeContext ? `\n${financeContext}\n` : '';
 	return persona + contextBlock + FINANCE_INTENT_INSTRUCTION;
+}
+
+// ---------------------------------------------------------------------------
+// Карьерная инструкция движку ([ADR-0028], career-intent диспетчер)
+// ---------------------------------------------------------------------------
+
+/**
+ * CAREER_INTENT_INSTRUCTION — протокол карьерных интентов.
+ *
+ * Тег блока свой (```career-intent), поэтому финансовый и карьерный экстракторы не
+ * перехватывают блоки друг друга. Оба блока в одном ходе допустимы: мост применит оба.
+ *
+ * Два правила диалога, которые схема проверить не может и потому живут здесь:
+ *   - СТРУКТУРА идёт кнопками и интентами, не разбором свободной речи (D1);
+ *   - ДЛИННЫЙ ТЕКСТ (about, формулировка достижения) сначала показывается владельцу
+ *     на подтверждение и эмитится интентом ТОЛЬКО после явного «да» (D2). Движок не
+ *     сочиняет за владельца ни одной строки резюме.
+ */
+export const CAREER_INTENT_INSTRUCTION = `
+
+## Карьерная база и резюме (career-intent протокол)
+
+Когда владелец правит резюме — эмитируй РОВНО ОДИН fenced-блок \`\`\`career-intent с JSON.
+Текст вокруг блока — пояснение владельцу; применяется только блок.
+
+ДЛИННЫЕ ТЕКСТЫ (about, формулировка достижения): сначала предложи формулировку обычным
+текстом и ДОЖДИСЬ подтверждения. Интент с этим текстом эмитируй только после явного «да».
+Фактов не выдумывай: числа живут в метриках, в тексте достижения им место только
+плейсхолдером \`{{metric.<ключ>}}\`.
+
+Виды интентов:
+
+\`\`\`career-intent
+{"type": "add_position", "id": "acme-backend", "org_key": "acme", "title": {"lang": "ru", "text": "Бэкенд-инженер"}, "employment": "full_time", "started_at": "2024-02", "order": 1}
+\`\`\`
+
+\`\`\`career-intent
+{"type": "add_profile", "headline": {"lang": "ru", "text": "Бэкенд-инженер"}, "about": {"lang": "ru", "text": "Текст о себе"}, "location": "Город, страна", "work_setup": {"mode": "remote", "relocation_ready": true}, "contact_keys": ["email_primary"]}
+\`\`\`
+
+\`\`\`career-intent
+{"type": "add_achievement", "id": "shipped-api", "position_id": "acme-backend", "text": {"lang": "ru", "text": "Запустил API для {{metric.services.count}} сервисов"}, "metric_keys": ["services.count"], "impact": "shipped", "order": 1}
+\`\`\`
+
+\`\`\`career-intent
+{"type": "add_metric", "key": "services.count", "value": 10, "unit": "count", "as_of": "2026-08-02", "source": "business", "verifiable": true}
+\`\`\`
+
+\`\`\`career-intent
+{"type": "add_skill", "id": "typescript", "name": {"lang": "ru", "text": "TypeScript", "no_translate": true}, "kind": "language", "level": "core", "first_used": "2024-02"}
+\`\`\`
+
+\`\`\`career-intent
+{"type": "add_education", "id": "spb-degree", "institution_key": "spb-institute", "program": {"lang": "ru", "text": "Информатика"}, "kind": "degree", "started_at": "2018-09", "ended_at": "2022-06"}
+\`\`\`
+
+\`\`\`career-intent
+{"type": "add_language", "id": "en", "level": "b2"}
+\`\`\`
+
+\`\`\`career-intent
+{"type": "add_project", "id": "synthetic-project", "name": {"lang": "ru", "text": "Synthetic Project", "no_translate": true}, "summary": {"lang": "ru", "text": "Описание проекта"}, "started_at": "2025-01", "wiki_ref": "wiki/projects/synthetic-project.md"}
+\`\`\`
+
+\`\`\`career-intent
+{"type": "add_contact", "key": "email_primary", "kind": "email", "render_required": true}
+\`\`\`
+
+\`\`\`career-intent
+{"type": "remove", "entity": "position", "id": "acme-backend"}
+\`\`\`
+
+\`\`\`career-intent
+{"type": "toggle_achievement", "variant_id": "ru-backend", "achievement_id": "shipped-api", "include": true}
+\`\`\`
+
+\`\`\`career-intent
+{"type": "reorder", "entity": "position", "id": "acme-backend", "order": 2}
+\`\`\`
+
+\`\`\`career-intent
+{"type": "set_status", "variant_id": "ru-backend", "status": "active"}
+\`\`\`
+
+\`\`\`career-intent
+{"type": "set_field", "entity": "position", "id": "acme-backend", "field": "ended_at", "value": "2026-07"}
+\`\`\`
+
+\`\`\`career-intent
+{"type": "set_field", "entity": "position", "id": "acme-backend", "field": "title", "value": "Ведущий бэкенд-инженер", "lang": "ru"}
+\`\`\`
+
+\`\`\`career-intent
+{"type": "create_variant", "id": "ru-backend", "lang": "ru", "role_family": "Бэкенд-инженер", "keywords": ["typescript", "postgresql"]}
+\`\`\`
+
+\`\`\`career-intent
+{"type": "query", "what": "positions"}
+\`\`\`
+
+Чтение: what ∈ positions | achievements | variants | skills | metrics | preview | directory.
+Для achievements и preview можно указать "variant_id" — тогда придут кнопки правки
+и предпросмотр именно этого варианта. "directory" отдаёт чеклист КЛЮЧЕЙ, которые владелец
+должен закрыть в gitignored-справочнике, чтобы резюме собралось.
+
+Правка = повторный интент с тем же id: леджер append-only, побеждает поздняя запись.
+Удаление — "remove" с entity ∈ position | achievement | skill | education | project.
+
+Метрики: "source" может быть только "business" или "manual"; машинные ("evidence")
+приходят из замера и руками не правятся. Для "business" обязателен "verifiable" —
+непроверяемое число в резюме опаснее его отсутствия.
+
+Чего НЕ делаешь: не заводишь фиктивные места работы и «компании-доноры» (полей под них
+в схеме нет), не пишешь реальные контакты и названия организаций — в базе только ключи,
+значения подставляются при рендере файла. Если владелец диктует телефон, почту или ссылку
+на профиль — НЕ пытайся их записать: они физически не доедут (write-path их маскирует).
+Заведи ключ через add_contact, ДОБАВЬ его в contact_keys профиля (add_profile) — иначе
+контакт в резюме не попадёт — и скажи, что значение вписывается в справочник рендера.
+`;
+
+/**
+ * appendCareerInstruction — добавляет карьерную инструкцию к персоне.
+ *
+ * @param persona — персона (возможно, уже с финансовой инструкцией)
+ * @returns персона с карьерным протоколом
+ */
+export function appendCareerInstruction(persona: string): string {
+	return persona + CAREER_INTENT_INSTRUCTION;
+}
+
+// ---------------------------------------------------------------------------
+// Инструкция воронки откликов ([ADR-0030], jobsearch-intent диспетчер)
+// ---------------------------------------------------------------------------
+
+/**
+ * JOBSEARCH_INTENT_INSTRUCTION — протокол воронки.
+ *
+ * Стадия отклика через интент НЕ устанавливается «как есть»: она вычисляется из потока
+ * событий, поэтому движок эмитит СОБЫТИЕ, а не состояние. Это не формальность — из потока
+ * восстановима история переходов, а из поля статуса нет.
+ */
+export const JOBSEARCH_INTENT_INSTRUCTION = `
+
+## Воронка откликов (jobsearch-intent протокол)
+
+Когда владелец говорит о компаниях, откликах и их движении — эмитируй РОВНО ОДИН
+fenced-блок \`\`\`jobsearch-intent с JSON. Текст вокруг блока — пояснение; применяется блок.
+
+Стадию отклика ты НЕ устанавливаешь напрямую: ты записываешь СОБЫТИЕ, а стадия из событий
+вычисляется. «Позвали на интервью» — это событие смены стадии, а не правка поля.
+
+\`\`\`jobsearch-intent
+{"type": "add_company", "site": "acme.example.com", "name": "Acme", "company_source": "manual"}
+\`\`\`
+
+\`\`\`jobsearch-intent
+{"type": "set_fit_rank", "company_id": "acme-example-com", "rank": 4}
+\`\`\`
+
+\`\`\`jobsearch-intent
+{"type": "add_application", "id": "acme-backend-2026-08", "company_id": "acme-example-com", "role_title": "Backend Engineer", "variant_id": "ru-backend", "company_source": "manual", "submission_channel": "referral", "applied_at": "2026-08-02T10:00:00Z"}
+\`\`\`
+
+\`\`\`jobsearch-intent
+{"type": "add_event", "application_id": "acme-backend-2026-08", "kind": "stage_change", "stage": "replied"}
+\`\`\`
+
+\`\`\`jobsearch-intent
+{"type": "add_event", "application_id": "acme-backend-2026-08", "kind": "stage_change", "stage": "interview", "scheduled_at": "2026-08-10T12:00:00Z"}
+\`\`\`
+
+\`\`\`jobsearch-intent
+{"type": "add_event", "application_id": "acme-backend-2026-08", "kind": "touchpoint", "touch_kind": "follow_up"}
+\`\`\`
+
+\`\`\`jobsearch-intent
+{"type": "query", "what": "funnel"}
+\`\`\`
+
+Стадии: applied | replied | screening | interview | test_task | offer | rejected | ghosted | withdrawn.
+Касания: outreach | follow_up | reply_sent | other — стадию НЕ двигают.
+Для стадий rejected/ghosted/withdrawn обязателен "reason_code"; код "other" требует "reason_note".
+
+Чего НЕ делаешь: не проставляешь "ghosted" сам по молчанию — это вывод владельца, он
+подтверждает его кнопкой; не сочиняешь проценты и конверсии (их считает код и всегда
+показывает вместе с числом наблюдений); не обещаешь полного покрытия рынка — показатели
+покрывают только подключённые источники.
+`;
+
+/**
+ * appendJobsearchInstruction — добавляет протокол воронки к персоне.
+ *
+ * @param persona — персона (возможно, уже с финансовой и карьерной инструкциями)
+ */
+export function appendJobsearchInstruction(persona: string): string {
+	return persona + JOBSEARCH_INTENT_INSTRUCTION;
 }

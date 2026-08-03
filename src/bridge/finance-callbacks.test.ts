@@ -20,7 +20,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { Ledger } from '../ingest/finance/ledger.js';
+import { createLedger, type FinanceLedger } from '../ingest/finance/ledger.js';
 import type { CreditRecord } from '../ingest/finance/types.js';
 import type { TelegramClient } from './telegram.js';
 import {
@@ -67,6 +67,8 @@ class MockTelegramClient implements TelegramClient {
 	photos: { chatId: number; caption?: string }[] = [];
 	documents: { chatId: number }[] = [];
 	answeredCallbacks: string[] = [];
+	editedMessages: { chatId: number; messageId: number; text: string }[] = [];
+	editedMarkups: { chatId: number; messageId: number }[] = [];
 	actions: { chatId: number; action: string }[] = [];
 
 	async sendMessage(chatId: number, text: string): Promise<void> {
@@ -80,6 +82,12 @@ class MockTelegramClient implements TelegramClient {
 	}
 	async answerCallbackQuery(callbackQueryId: string): Promise<void> {
 		this.answeredCallbacks.push(callbackQueryId);
+	}
+	async editMessageText(chatId: number, messageId: number, text: string): Promise<void> {
+		this.editedMessages.push({ chatId, messageId, text });
+	}
+	async editMessageReplyMarkup(chatId: number, messageId: number): Promise<void> {
+		this.editedMarkups.push({ chatId, messageId });
 	}
 	async sendChatAction(chatId: number, action = 'typing'): Promise<void> {
 		this.actions.push({ chatId, action });
@@ -106,7 +114,7 @@ const nowFn = () => fixedNow;
 let ledgerDir: string;
 let publicFakeDir: string;
 let stateDirPath: string;
-let ledger: Ledger;
+let ledger: FinanceLedger;
 let telegram: MockTelegramClient;
 
 /** Мок рендерера PNG — возвращает фейковый Buffer без реального resvg. */
@@ -118,7 +126,7 @@ beforeEach(() => {
 	ledgerDir = mkdtempSync(join(tmpdir(), 'fcb-ledger-'));
 	publicFakeDir = mkdtempSync(join(tmpdir(), 'fcb-public-'));
 	stateDirPath = mkdtempSync(join(tmpdir(), 'fcb-state-'));
-	ledger = new Ledger({ financeDir: ledgerDir, publicRepoRoot: publicFakeDir });
+	ledger = createLedger({ dir: ledgerDir, publicRepoRoot: publicFakeDir });
 	telegram = new MockTelegramClient();
 });
 

@@ -100,6 +100,23 @@ export interface TelegramClient {
 	sendDocument(chatId: number, document: InputFile, opts?: SendMediaOptions): Promise<void>;
 	/** Погасить «часики» на инлайн-кнопке (best-effort). [ADR-0023]. */
 	answerCallbackQuery(callbackQueryId: string, opts?: AnswerCallbackOptions): Promise<void>;
+	/**
+	 * Переписать текст ранее отправленного сообщения (и, опционально, его клавиатуру).
+	 * Нужен кнопочному редактированию карьерной базы ([ADR-0028], D1): без него каждое
+	 * нажатие плодит НОВОЕ сообщение, и диалог правки характеристики становится нечитаемым.
+	 */
+	editMessageText(
+		chatId: number,
+		messageId: number,
+		text: string,
+		opts?: SendMessageOptions,
+	): Promise<void>;
+	/** Переписать только клавиатуру сообщения (напр. снять кнопки после действия). */
+	editMessageReplyMarkup(
+		chatId: number,
+		messageId: number,
+		replyMarkup?: ReplyMarkup,
+	): Promise<void>;
 	sendChatAction(chatId: number, action?: string): Promise<void>;
 	getMe(): Promise<Record<string, unknown>>;
 	/** Long-poll за апдейтами (polling-режим, [ADR-0014]); массив update-объектов. */
@@ -211,6 +228,53 @@ export class BotApiTelegramClient implements TelegramClient {
 			});
 		} catch (exc) {
 			log.debug({ error: String(exc) }, 'telegram.answer_callback_failed');
+		}
+	}
+
+	/**
+	 * Переписать текст сообщения на месте ([ADR-0028], кнопочная правка D1).
+	 *
+	 * Best-effort по одной конкретной причине: Telegram отвечает ошибкой
+	 * «message is not modified», если новый текст совпадает со старым — это штатная
+	 * ситуация при повторном нажатии той же кнопки, и ронять из-за неё ход нельзя.
+	 */
+	async editMessageText(
+		chatId: number,
+		messageId: number,
+		text: string,
+		opts: SendMessageOptions = {},
+	): Promise<void> {
+		try {
+			await this.call('editMessageText', {
+				chat_id: chatId,
+				message_id: messageId,
+				text,
+				...(opts.parseMode ? { parse_mode: opts.parseMode } : {}),
+				...(opts.replyMarkup ? { reply_markup: opts.replyMarkup } : {}),
+			});
+		} catch (exc) {
+			log.debug({ error: String(exc) }, 'telegram.edit_message_text_failed');
+		}
+	}
+
+	/**
+	 * Переписать клавиатуру сообщения. Без `replyMarkup` кнопки снимаются —
+	 * так закрывается уже отработавший кнопочный флоу, чтобы по нему нельзя было
+	 * кликнуть второй раз.
+	 */
+	async editMessageReplyMarkup(
+		chatId: number,
+		messageId: number,
+		replyMarkup?: ReplyMarkup,
+	): Promise<void> {
+		try {
+			await this.call('editMessageReplyMarkup', {
+				chat_id: chatId,
+				message_id: messageId,
+				...(replyMarkup ? { reply_markup: replyMarkup } : {}),
+			});
+		} catch (exc) {
+			log.debug({ error: String(exc) }, 'telegram.edit_reply_markup_failed');
 		}
 	}
 

@@ -27,7 +27,7 @@ import {
 	StablecoinFxProvider,
 	createDefaultFxProvider,
 } from './fx.js';
-import { Ledger, LedgerPathError } from './ledger.js';
+import { createLedger, LedgerPathError, type FinanceLedger } from './ledger.js';
 import {
 	deterministicId,
 	normalizeWalletBalance,
@@ -411,14 +411,14 @@ describe('normalize: normalizeTransactionLog', () => {
 
 describe('ledger: round-trip append + readAll', () => {
 	let tmpDir: string;
-	let ledger: Ledger;
+	let ledger: FinanceLedger;
 
 	beforeEach(() => {
 		// Создаём временную директорию — изолирует каждый тест.
 		tmpDir = mkdtempSync(join(tmpdir(), 'ledger-test-'));
 		const financeDir = join(tmpDir, 'raw', 'finance');
 		// publicRepoRoot за пределами tmpDir → path guard не срабатывает.
-		ledger = new Ledger({ financeDir, publicRepoRoot: join(tmpDir, 'public-fake') });
+		ledger = createLedger({ dir: financeDir, publicRepoRoot: join(tmpDir, 'public-fake') });
 	});
 
 	afterEach(() => {
@@ -550,7 +550,7 @@ describe('ledger: path-guard защита публичного репо', () => 
 		const publicRoot = join(tmpDir, 'public-repo');
 		const financeDir = join(publicRoot, 'raw', 'finance'); // ← ВНУТРИ публичного!
 
-		const badLedger = new Ledger({ financeDir, publicRepoRoot: publicRoot });
+		const badLedger = createLedger({ dir: financeDir, publicRepoRoot: publicRoot });
 
 		expect(() =>
 			badLedger.append('fx_rates', {
@@ -566,7 +566,7 @@ describe('ledger: path-guard защита публичного репо', () => 
 	it('LedgerPathError с понятным сообщением о публичном репо', () => {
 		const publicRoot = join(tmpDir, 'public-repo');
 		const financeDir = join(publicRoot, 'raw', 'finance');
-		const badLedger = new Ledger({ financeDir, publicRepoRoot: publicRoot });
+		const badLedger = createLedger({ dir: financeDir, publicRepoRoot: publicRoot });
 
 		let thrown: LedgerPathError | null = null;
 		try {
@@ -603,7 +603,7 @@ describe('ledger: path-guard защита публичного репо', () => 
 		const financeDir = join(contentRoot, 'raw', 'finance');
 		const publicRoot = join(tmpDir, 'public-repo'); // другое поддерево
 
-		const goodLedger = new Ledger({ financeDir, publicRepoRoot: publicRoot });
+		const goodLedger = createLedger({ dir: financeDir, publicRepoRoot: publicRoot });
 
 		// Не должно бросать.
 		expect(() =>

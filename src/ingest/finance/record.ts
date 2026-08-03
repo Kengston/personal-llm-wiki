@@ -24,7 +24,7 @@
 
 import { z } from 'zod';
 
-import { Ledger } from './ledger.js';
+import type { FinanceLedger } from './ledger.js';
 import { deterministicId } from './normalize.js';
 import type { AccountRecord, SnapshotRecord, TransactionRecord } from './types.js';
 
@@ -325,9 +325,9 @@ export type RecordInput =
 export interface RecordDeps {
 	/**
 	 * ledger — экземпляр Ledger для чтения и записи JSONL-файлов.
-	 * В тестах: Ledger с tmp-каталогом (mkdtempSync).
+	 * В тестах: FinanceLedger с tmp-каталогом (mkdtempSync).
 	 */
-	ledger: Ledger;
+	ledger: FinanceLedger;
 
 	/**
 	 * nowFn — функция получения текущего времени.
@@ -451,7 +451,7 @@ function nowIsoLocal(nowFn: () => Date): string {
  * @returns true если счёт был создан, false если уже существовал
  */
 function ensureAccount(
-	ledger: Ledger,
+	ledger: FinanceLedger,
 	accountId: string,
 	bootstrap: AccountBootstrap,
 	written: Array<AccountRecord | SnapshotRecord | TransactionRecord>,
@@ -490,7 +490,7 @@ function ensureAccount(
  * @param txId   — детерминированный id транзакции
  * @returns true если дубль найден
  */
-function isDuplicateTx(ledger: Ledger, txId: string): boolean {
+function isDuplicateTx(ledger: FinanceLedger, txId: string): boolean {
 	// Линейный поиск — приемлемо для личного финансового леджера (< 10k записей).
 	// При необходимости можно кэшировать Set<id> при создании Ledger.
 	const existing = ledger.readAll('transactions');
@@ -505,7 +505,7 @@ function isDuplicateTx(ledger: Ledger, txId: string): boolean {
  * @param accountIds      — набор id счетов
  * @returns массив BalanceSummary (по одному на каждый id у которого есть снапшот)
  */
-function buildBalances(ledger: Ledger, accountIds: string[]): BalanceSummary[] {
+function buildBalances(ledger: FinanceLedger, accountIds: string[]): BalanceSummary[] {
 	// Читаем все снапшоты из леджера (включая только что записанные).
 	const allSnapshots = ledger.readAll('snapshots');
 
@@ -554,7 +554,7 @@ function buildBalances(ledger: Ledger, accountIds: string[]): BalanceSummary[] {
  */
 function processSnapshot(
 	input: z.infer<typeof SnapshotInputSchema>,
-	ledger: Ledger,
+	ledger: FinanceLedger,
 	nowFn: () => Date,
 	written: Array<AccountRecord | SnapshotRecord | TransactionRecord>,
 	touchedIds: Set<string>,
@@ -596,7 +596,7 @@ function processSnapshot(
  */
 function processTransaction(
 	input: z.infer<typeof TransactionInputSchema>,
-	ledger: Ledger,
+	ledger: FinanceLedger,
 	nowFn: () => Date,
 	written: Array<AccountRecord | SnapshotRecord | TransactionRecord>,
 	touchedIds: Set<string>,
@@ -651,7 +651,7 @@ function processTransaction(
  */
 function processVoid(
 	input: z.infer<typeof VoidInputSchema>,
-	ledger: Ledger,
+	ledger: FinanceLedger,
 	nowFn: () => Date,
 	written: Array<AccountRecord | SnapshotRecord | TransactionRecord>,
 	touchedIds: Set<string>,
@@ -707,7 +707,7 @@ function processVoid(
  */
 function processAmend(
 	input: z.infer<typeof AmendInputSchema>,
-	ledger: Ledger,
+	ledger: FinanceLedger,
 	nowFn: () => Date,
 	written: Array<AccountRecord | SnapshotRecord | TransactionRecord>,
 	touchedIds: Set<string>,
@@ -773,7 +773,7 @@ function processAmend(
  */
 function processTransfer(
 	input: z.infer<typeof TransferInputSchema>,
-	ledger: Ledger,
+	ledger: FinanceLedger,
 	nowFn: () => Date,
 	written: Array<AccountRecord | SnapshotRecord | TransactionRecord>,
 	touchedIds: Set<string>,

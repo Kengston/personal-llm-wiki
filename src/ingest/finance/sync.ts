@@ -24,7 +24,7 @@
 import { childLogger } from '../../core/logger.js';
 import { BybitClient, type BybitClientConfig } from './bybit.js';
 import { createDefaultFxProvider, type FxProvider } from './fx.js';
-import { createLedger, type Ledger, type LedgerOptions } from './ledger.js';
+import { createLedger, type FinanceLedger, type LedgerOptions } from './ledger.js';
 import { makeFxRateRecord, normalizeTransactionLog, normalizeWalletBalance, nowIso } from './normalize.js';
 import { isMainModule } from '../../core/cli.js';
 
@@ -44,7 +44,7 @@ export interface SyncDeps {
 	/** Окружение (для BybitClient и Ledger). По умолчанию process.env. */
 	env?: NodeJS.ProcessEnv;
 	/** Ledger для записи. По умолчанию создаётся из env. */
-	ledger?: Ledger;
+	ledger?: FinanceLedger;
 	/** FX-провайдер. По умолчанию createDefaultFxProvider(). */
 	fxProvider?: FxProvider;
 	/** Конфигурация HTTP-клиента (инъекция fetchFn для тестов). */
@@ -192,7 +192,7 @@ async function appendFxRate(
 	quote: string,
 	fxProvider: FxProvider,
 	syncTs: string,
-	ledger: Ledger,
+	ledger: FinanceLedger,
 	result: SyncResult,
 	dryRun: boolean,
 ): Promise<void> {
