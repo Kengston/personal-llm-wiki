@@ -302,3 +302,89 @@ describe('dispatchJobsearchCallback', () => {
 		expect(ledger.readAll('application_events')).toEqual([]);
 	});
 });
+
+// ---------------------------------------------------------------------------
+// 4. Список компаний: гейты, объяснение ранга, оговорка о покрытии
+// ---------------------------------------------------------------------------
+
+describe('query companies', () => {
+	/** Заводит компанию и приводит её признаки к нужным значениям. */
+	function company(site: string, name: string, patch: Record<string, unknown> = {}): void {
+		dispatchJobsearchIntent({ type: 'add_company', site, name, company_source: 'manual' }, deps());
+		if (Object.keys(patch).length === 0) return;
+		const last = ledger.readAll('companies').at(-1)!;
+		ledger.append('companies', {
+			...last,
+			...patch,
+			ts: '2026-08-02T13:00:00Z',
+		} as never);
+	}
+
+	const assessed = <T extends string>(value: T) => ({
+		value,
+		source: 'manual' as const,
+		confirmed_by_human: false,
+		confirmed_at: null,
+	});
+
+	it('оговорка о покрытии стоит в ответе и не обещает рынка', () => {
+		// [ADR-0029], «Следствия»: одна строка-шаблон рядом с генератором ответа,
+		// а не редполитика. Подключённые источники считаются из данных.
+		company('acme.example.com', 'Acme');
+
+		const text = dispatchJobsearchIntent({ type: 'query', what: 'companies' }, deps()).text;
+
+		expect(text).toContain('Из подключённых источников');
+		expect(text).toContain('manual');
+		expect(text).not.toMatch(/все компании|весь рынок/i);
+	});
+
+	it('пустой реестр тоже несёт оговорку, а не голое «компаний нет»', () => {
+		const text = dispatchJobsearchIntent({ type: 'query', what: 'companies' }, deps()).text;
+
+		expect(text).toContain('нет подключённых');
+	});
+
+	it('сортировка объясняется фактами, а не баллом', () => {
+		company('low.example.com', 'Low', { fit_rank: 1 });
+		company('high.example.com', 'High', {
+			fit_rank: 5,
+			has_warm_contact: assessed('yes'),
+			hires_contractors: { ...assessed('yes'), confirmed_by_human: true },
+		});
+
+		const text = dispatchJobsearchIntent({ type: 'query', what: 'companies' }, deps()).text;
+
+		expect(text.indexOf('high-example-com')).toBeLessThan(text.indexOf('low-example-com'));
+		expect(text).toContain('вес 5');
+		expect(text).toContain('контрактор подтверждён в разговоре');
+		expect(text).toContain('есть тёплый контакт');
+	});
+
+	it('отсеянные не исчезают молча — они перечислены с причиной', () => {
+		company('acme.example.com', 'Acme');
+		company('onsite.example.com', 'Onsite Only', {
+			remote_mode: assessed('onsite'),
+			hires_contractors: assessed('no'),
+		});
+
+		const text = dispatchJobsearchIntent({ type: 'query', what: 'companies' }, deps()).text;
+
+		expect(text).toContain('Компании (1 из 2)');
+		expect(text).toContain('Отсеяно (1)');
+		expect(text).toContain('только офис');
+		expect(text).toContain('контракторов не берут');
+	});
+
+	it('unknown не отсеивает — компания остаётся в списке', () => {
+		company('acme.example.com', 'Acme', {
+			work_permit_required: assessed('unknown'),
+			hires_contractors: assessed('unknown'),
+		});
+
+		const text = dispatchJobsearchIntent({ type: 'query', what: 'companies' }, deps()).text;
+
+		expect(text).toContain('Компании (1 из 1)');
+		expect(text).toContain('разрешение на работу — выясняется в разговоре');
+	});
+});
