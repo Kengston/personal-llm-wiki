@@ -22,7 +22,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { Ledger, LedgerPathError } from './ledger.js';
+import { createLedger, LedgerPathError, type FinanceLedger } from './ledger.js';
 import {
 	AccountRecordSchema,
 	BudgetRecordSchema,
@@ -44,9 +44,9 @@ import {
  * makeLedger — создаёт изолированный Ledger в переданном tmp-каталоге.
  * publicRepoRoot за пределами tmpDir → path-guard не срабатывает в нормальных тестах.
  */
-function makeLedger(tmpDir: string): Ledger {
+function makeLedger(tmpDir: string): FinanceLedger {
 	const financeDir = join(tmpDir, 'raw', 'finance');
-	return new Ledger({ financeDir, publicRepoRoot: join(tmpDir, 'public-fake') });
+	return createLedger({ dir: financeDir, publicRepoRoot: join(tmpDir, 'public-fake') });
 }
 
 // ---------------------------------------------------------------------------
@@ -55,7 +55,7 @@ function makeLedger(tmpDir: string): Ledger {
 
 describe('schema: BudgetRecord — round-trip append + readAll', () => {
 	let tmpDir: string;
-	let ledger: Ledger;
+	let ledger: FinanceLedger;
 
 	beforeEach(() => {
 		tmpDir = mkdtempSync(join(tmpdir(), 'schema-budget-'));
@@ -132,7 +132,7 @@ describe('schema: BudgetRecord — round-trip append + readAll', () => {
 
 describe('schema: CategoryRecord — round-trip append + readAll', () => {
 	let tmpDir: string;
-	let ledger: Ledger;
+	let ledger: FinanceLedger;
 
 	beforeEach(() => {
 		tmpDir = mkdtempSync(join(tmpdir(), 'schema-category-'));
@@ -199,7 +199,7 @@ describe('schema: CategoryRecord — round-trip append + readAll', () => {
 
 describe('schema: TemplateRecord — round-trip append + readAll', () => {
 	let tmpDir: string;
-	let ledger: Ledger;
+	let ledger: FinanceLedger;
 
 	beforeEach(() => {
 		tmpDir = mkdtempSync(join(tmpdir(), 'schema-template-'));
@@ -268,7 +268,7 @@ describe('schema: TemplateRecord — round-trip append + readAll', () => {
 
 describe('schema: ReceivableRecord — round-trip append + readAll', () => {
 	let tmpDir: string;
-	let ledger: Ledger;
+	let ledger: FinanceLedger;
 
 	beforeEach(() => {
 		tmpDir = mkdtempSync(join(tmpdir(), 'schema-receivable-'));
@@ -333,7 +333,7 @@ describe('schema: ReceivableRecord — round-trip append + readAll', () => {
 
 describe('schema: PayableRecord — round-trip append + readAll', () => {
 	let tmpDir: string;
-	let ledger: Ledger;
+	let ledger: FinanceLedger;
 
 	beforeEach(() => {
 		tmpDir = mkdtempSync(join(tmpdir(), 'schema-payable-'));
@@ -381,7 +381,7 @@ describe('schema: PayableRecord — round-trip append + readAll', () => {
 
 describe('schema: SettingsRecord — round-trip append + readAll', () => {
 	let tmpDir: string;
-	let ledger: Ledger;
+	let ledger: FinanceLedger;
 
 	beforeEach(() => {
 		tmpDir = mkdtempSync(join(tmpdir(), 'schema-settings-'));
@@ -485,7 +485,7 @@ describe('schema: path-guard для новых типов файлов', () => {
 		// financeDir ВНУТРИ publicRepoRoot — должен бросить LedgerPathError
 		const publicRoot = join(tmpDir, 'public-repo');
 		const financeDir = join(publicRoot, 'raw', 'finance');
-		const badLedger = new Ledger({ financeDir, publicRepoRoot: publicRoot });
+		const badLedger = createLedger({ dir: financeDir, publicRepoRoot: publicRoot });
 
 		expect(() =>
 			badLedger.append('budgets', {
@@ -503,7 +503,7 @@ describe('schema: path-guard для новых типов файлов', () => {
 	it('LedgerPathError при записи settings в публичный путь', () => {
 		const publicRoot = join(tmpDir, 'public-repo');
 		const financeDir = join(publicRoot, 'raw', 'finance');
-		const badLedger = new Ledger({ financeDir, publicRepoRoot: publicRoot });
+		const badLedger = createLedger({ dir: financeDir, publicRepoRoot: publicRoot });
 
 		expect(() =>
 			badLedger.append('settings', {
@@ -520,7 +520,7 @@ describe('schema: path-guard для новых типов файлов', () => {
 		const financeDir = join(contentRoot, 'raw', 'finance');
 		const publicRoot = join(tmpDir, 'public-repo'); // отдельное поддерево
 
-		const goodLedger = new Ledger({ financeDir, publicRepoRoot: publicRoot });
+		const goodLedger = createLedger({ dir: financeDir, publicRepoRoot: publicRoot });
 
 		expect(() =>
 			goodLedger.append('settings', {

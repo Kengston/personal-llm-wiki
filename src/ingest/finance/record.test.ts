@@ -26,7 +26,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { Ledger, LedgerPathError } from './ledger.js';
+import { createLedger, LedgerPathError, type FinanceLedger } from './ledger.js';
 import { deterministicId } from './normalize.js';
 import {
 	makeAccountId,
@@ -65,8 +65,8 @@ const fakeNow = () => new Date(FAKE_TS);
 function makeDeps(tmpDir: string, nowOverride?: () => Date): { deps: RecordDeps; financeDir: string } {
 	const financeDir = join(tmpDir, 'raw', 'finance');
 	// publicRepoRoot снаружи tmpDir → path-guard не срабатывает на корректных тестах.
-	const ledger = new Ledger({
-		financeDir,
+	const ledger = createLedger({
+		dir: financeDir,
 		publicRepoRoot: join(tmpDir, 'public-fake-repo'),
 	});
 	return {
@@ -82,7 +82,7 @@ function makeDeps(tmpDir: string, nowOverride?: () => Date): { deps: RecordDeps;
 describe('record: бутстрап нового счёта', () => {
 	let tmpDir: string;
 	let deps: RecordDeps;
-	let ledger: Ledger;
+	let ledger: FinanceLedger;
 
 	beforeEach(() => {
 		tmpDir = mkdtempSync(join(tmpdir(), 'record-bootstrap-'));
@@ -234,7 +234,7 @@ describe('record: бутстрап нового счёта', () => {
 describe('record: батч — несколько счетов за один вызов', () => {
 	let tmpDir: string;
 	let deps: RecordDeps;
-	let ledger: Ledger;
+	let ledger: FinanceLedger;
 
 	beforeEach(() => {
 		tmpDir = mkdtempSync(join(tmpdir(), 'record-batch-'));
@@ -350,7 +350,7 @@ describe('record: батч — несколько счетов за один в�
 describe('record: наличка cash в VND', () => {
 	let tmpDir: string;
 	let deps: RecordDeps;
-	let ledger: Ledger;
+	let ledger: FinanceLedger;
 
 	beforeEach(() => {
 		tmpDir = mkdtempSync(join(tmpdir(), 'record-cash-vnd-'));
@@ -440,7 +440,7 @@ describe('record: наличка cash в VND', () => {
 describe('record: доход и расход', () => {
 	let tmpDir: string;
 	let deps: RecordDeps;
-	let ledger: Ledger;
+	let ledger: FinanceLedger;
 
 	beforeEach(() => {
 		tmpDir = mkdtempSync(join(tmpdir(), 'record-inout-'));
@@ -547,7 +547,7 @@ describe('record: доход и расход', () => {
 describe('record: дедуп — идентичный ввод не дублируется', () => {
 	let tmpDir: string;
 	let deps: RecordDeps;
-	let ledger: Ledger;
+	let ledger: FinanceLedger;
 
 	beforeEach(() => {
 		tmpDir = mkdtempSync(join(tmpdir(), 'record-dedup-'));
@@ -612,7 +612,7 @@ describe('record: дедуп — идентичный ввод не дублир
 describe('record: void — сторно транзакции', () => {
 	let tmpDir: string;
 	let deps: RecordDeps;
-	let ledger: Ledger;
+	let ledger: FinanceLedger;
 
 	beforeEach(() => {
 		tmpDir = mkdtempSync(join(tmpdir(), 'record-void-'));
@@ -709,7 +709,7 @@ describe('record: void — сторно транзакции', () => {
 describe('record: amend — правка транзакции', () => {
 	let tmpDir: string;
 	let deps: RecordDeps;
-	let ledger: Ledger;
+	let ledger: FinanceLedger;
 
 	beforeEach(() => {
 		tmpDir = mkdtempSync(join(tmpdir(), 'record-amend-'));
@@ -779,7 +779,7 @@ describe('record: amend — правка транзакции', () => {
 describe('record: transfer — перевод между счетами', () => {
 	let tmpDir: string;
 	let deps: RecordDeps;
-	let ledger: Ledger;
+	let ledger: FinanceLedger;
 
 	beforeEach(() => {
 		tmpDir = mkdtempSync(join(tmpdir(), 'record-transfer-'));
@@ -927,7 +927,7 @@ describe('record: path-guard защита публичного репо', () => 
 		const publicRoot = join(tmpDir, 'public-repo');
 		const financeDir = join(publicRoot, 'raw', 'finance'); // ← ВНУТРИ публичного!
 
-		const badLedger = new Ledger({ financeDir, publicRepoRoot: publicRoot });
+		const badLedger = createLedger({ dir: financeDir, publicRepoRoot: publicRoot });
 		const badDeps: RecordDeps = { ledger: badLedger, nowFn: fakeNow };
 
 		expect(() =>
@@ -948,7 +948,7 @@ describe('record: path-guard защита публичного репо', () => 
 		const publicRoot = join(tmpDir, 'public-repo');
 		const financeDir = join(publicRoot, 'raw', 'finance');
 
-		const badLedger = new Ledger({ financeDir, publicRepoRoot: publicRoot });
+		const badLedger = createLedger({ dir: financeDir, publicRepoRoot: publicRoot });
 		const badDeps: RecordDeps = { ledger: badLedger, nowFn: fakeNow };
 
 		let thrown: LedgerPathError | null = null;

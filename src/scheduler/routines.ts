@@ -11,7 +11,10 @@ import { DateTime } from 'luxon';
 
 import { isMainModule } from '../core/cli.js';
 import { childLogger } from '../core/logger.js';
+import { createJobsearchLedger } from '../ingest/jobsearch/ledger.js';
 import { loadSchedulerConfig, type SchedulerConfig } from './config.js';
+import { resolveFinanceStateDir } from './finance-state.js';
+import { runJobsearchSweep } from './jobsearch-sweep.js';
 import { runSweep } from './digest.js';
 import { lint, renderOffence } from './lint-public.js';
 import { existsSync, readFileSync } from 'node:fs';
@@ -165,8 +168,29 @@ export function runCompile(cfg: SchedulerConfig, opts: RoutineOptions): Promise<
 	});
 }
 
-export function runDigest(cfg: SchedulerConfig, opts: RoutineOptions): Promise<number> {
-	return runSweep(cfg, { now: opts.now, dryRun: opts.dryRun });
+export async function runDigest(cfg: SchedulerConfig, opts: RoutineOptions): Promise<number> {
+	const rc = await runSweep(cfg, { now: opts.now, dryRun: opts.dryRun });
+
+	// Проактив воронки ([ADR-0030], Решение 5) вызывается ЗДЕСЬ, а не через опциональный
+	// параметр `runSweep`. Финансовый проактив написан и мёртв ровно потому, что его
+	// результат надо прокидывать в свип извне, и этого никто не делает: шов, который можно
+	// забыть соединить, рано или поздно оказывается несоединённым.
+	// Каталог состояния общий с финансовым (`.finance-state/`) — механика fired/snooze не
+	// финансово-специфична, ключи разведены префиксом `js:`.
+	if (!opts.dryRun) {
+		try {
+			const sent = await runJobsearchSweep(createJobsearchLedger(), opts.now.toISO() ?? '', {
+				stateDir: resolveFinanceStateDir(process.env),
+				followUpAfterDays: Number(process.env.JOBSEARCH_FOLLOWUP_DAYS ?? 7),
+			});
+			if (sent > 0) log.info({ sent }, 'digest.jobsearch_proactive_sent');
+		} catch (err) {
+			// Проактив воронки не имеет права уронить дайджест: он дополнение, а не основа.
+			log.warn({ err: String(err) }, 'digest.jobsearch_proactive_failed');
+		}
+	}
+
+	return rc;
 }
 
 export async function runLint(cfg: SchedulerConfig, opts: RoutineOptions): Promise<number> {
@@ -176,7 +200,8 @@ export async function runLint(cfg: SchedulerConfig, opts: RoutineOptions): Promi
 		process.stderr.write(
 			`FAIL: публичный репо НЕ чист — ${offences.length} нарушение(й) (см. lint-public):\n`,
 		);
-		for (const off of offences) process.stderr.write('  ' + renderOffence(off, cfg.publicRepo) + '\n');
+		for (const off of offences)
+			process.stderr.write('  ' + renderOffence(off, cfg.publicRepo) + '\n');
 		if (!opts.dryRun) return 1;
 	}
 	// (б) Содержательный аудит вики движком.

@@ -19,7 +19,10 @@
 		"format": "prettier --write \"src/**/*.ts\"",
 		"typecheck": "tsc --noEmit",
 		"test": "vitest run",
-		"finance:smoke": "pnpm build && node scripts/finance-smoke.mjs"
+		"finance:smoke": "pnpm build && node scripts/finance-smoke.mjs",
+		"career:evidence": "pnpm build && node scripts/career-import-evidence.mjs",
+		"jobsearch:report": "pnpm build && node dist/bridge/jobsearch-report.js",
+		"career:directory": "pnpm build && node scripts/career-directory.mjs"
 	},
 	"dependencies": {
 		"@resvg/resvg-js": "^2.6.2",

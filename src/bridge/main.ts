@@ -12,14 +12,25 @@ import dotenvFlow from 'dotenv-flow';
 dotenvFlow.config({ silent: true });
 
 import { childLogger } from '../core/logger.js';
-import { Ledger, resolveFinanceDir } from '../ingest/finance/ledger.js';
+import { createCareerLedger, resolveCareerDir, type CareerLedger } from '../ingest/career/store.js';
+import {
+	createJobsearchLedger,
+	resolveJobsearchDir,
+	type JobsearchLedger,
+} from '../ingest/jobsearch/ledger.js';
+import { createLedger, resolveFinanceDir, type FinanceLedger } from '../ingest/finance/ledger.js';
 import { resolveFinanceStateDir } from '../scheduler/finance-state.js';
 import { buildApp, BridgeState, startWorkers, stopBridge } from './app.js';
 import { loadSettings } from './config.js';
 import { buildEngineFromEnv } from './engine.js';
 import { buildFinanceContextSummary } from './finance-intent.js';
 import { runPoller } from './poller.js';
-import { appendFinanceInstruction, loadPersona } from './prompt.js';
+import {
+	appendCareerInstruction,
+	appendFinanceInstruction,
+	appendJobsearchInstruction,
+	loadPersona,
+} from './prompt.js';
 import { loadSessionsConfig } from './sessions.js';
 import { SessionStore } from './store.js';
 import { BotApiTelegramClient } from './telegram.js';
@@ -46,7 +57,7 @@ async function main(): Promise<void> {
 	// дефолтный ~/llm-wiki-content/raw/finance (Ledger создаётся, но каталог не трогается
 	// до первой записи). Опционально: при ошибке инициализации (неправильные пути) мост
 	// стартует без финансового шва (financeLedger = undefined → блок в app.ts не активен).
-	let financeLedger: Ledger | undefined;
+	let financeLedger: FinanceLedger | undefined;
 	let financeGoalsDir: string | undefined;
 	// financeStateDir — каталог мутабельного состояния финпроактива (.finance-state/):
 	// pending-cash-survey (ответ числом на опрос налички) и last-input watermark
@@ -54,11 +65,10 @@ async function main(): Promise<void> {
 	// пробрасываем его в BridgeState (иначе app.ts получит undefined, как было до фикса).
 	let financeStateDir: string | undefined;
 	try {
-		financeLedger = new Ledger({ env: process.env });
+		financeLedger = createLedger({ env: process.env });
 		// goals-каталог: wiki/finance/goals/ в приватном репо (WIKI_REPO_PATH) или CONTENT_ROOT.
 		const contentRoot =
-			(process.env.CONTENT_ROOT ?? '').trim() ||
-			(wikiRepo ? wikiRepo : undefined);
+			(process.env.CONTENT_ROOT ?? '').trim() || (wikiRepo ? wikiRepo : undefined);
 		if (contentRoot) {
 			financeGoalsDir = join(contentRoot, 'wiki', 'finance', 'goals');
 		}
@@ -74,6 +84,29 @@ async function main(): Promise<void> {
 		financeLedger = undefined;
 	}
 
+	// Карьерная база ([ADR-0028]): каталог резолвится из окружения (CAREER_RAW_DIR →
+	// RAW_DIR/career → CONTENT_ROOT/raw/career). О включении и об ОТКЛЮЧЕНИИ говорим в лог
+	// явно: модуль, который молча не работает, неотличим от работающего вхолостую.
+	let careerLedger: CareerLedger | undefined;
+	try {
+		careerLedger = createCareerLedger({ env: process.env });
+		log.info({ careerDir: resolveCareerDir(process.env) }, 'career.ledger_ready');
+	} catch (err) {
+		log.warn({ err: String(err) }, 'career.ledger_init_failed — career-intent ОТКЛЮЧЁН');
+		careerLedger = undefined;
+	}
+
+	// Воронка откликов ([ADR-0030]): тот же каталог `raw/jobsearch/`, что и у реестра
+	// компаний. О включении и об ОТКЛЮЧЕНИИ говорим в лог явно.
+	let jobsearchLedger: JobsearchLedger | undefined;
+	try {
+		jobsearchLedger = createJobsearchLedger({ env: process.env });
+		log.info({ jobsearchDir: resolveJobsearchDir(process.env) }, 'jobsearch.ledger_ready');
+	} catch (err) {
+		log.warn({ err: String(err) }, 'jobsearch.ledger_init_failed — jobsearch-intent ОТКЛЮЧЁН');
+		jobsearchLedger = undefined;
+	}
+
 	// Персона с финансовой инструкцией (ADR-0024): если леджер доступен — добавляем
 	// finance-intent протокол и снапшот финансового контекста (балансы, net-worth)
 	// на момент старта. Контекст статичный на старт процесса — приемлемо для single-user
@@ -84,22 +117,31 @@ async function main(): Promise<void> {
 	const financeContext = financeLedger
 		? buildFinanceContextSummary(financeLedger, financeGoalsDir)
 		: null;
-	const systemPrompt = financeLedger
+	const withFinance = financeLedger
 		? appendFinanceInstruction(basePersona, financeContext)
 		: basePersona;
+	// Карьерный протокол добавляется отдельно: модули независимы, и включённые финансы
+	// не должны быть условием работы резюме (и наоборот).
+	const withCareer = careerLedger ? appendCareerInstruction(withFinance) : withFinance;
+	const systemPrompt = jobsearchLedger ? appendJobsearchInstruction(withCareer) : withCareer;
 
-	const state = new BridgeState(
+	const state = new BridgeState({
 		settings,
-		buildEngineFromEnv(process.env, { systemPrompt }),
-		new SessionStore(settings.dbPath),
-		new BotApiTelegramClient(settings.botToken),
-		wikiRepo,
-		sessionsCfg,
+		engine: buildEngineFromEnv(process.env, { systemPrompt }),
+		store: new SessionStore(settings.dbPath),
+		telegram: new BotApiTelegramClient(settings.botToken),
+		wikiRepoPath: wikiRepo,
+		sessions: sessionsCfg,
 		resumeEngineFor,
 		financeLedger,
 		financeGoalsDir,
 		financeStateDir,
-	);
+		careerLedger,
+		jobsearchLedger,
+		// Каталог состояния проактива общий с финансовым: механика fired/snooze не
+		// финансово-специфична, ключи разведены префиксом `js:`.
+		jobsearchStateDir: financeStateDir,
+	});
 	if (sessionsCfg.enabled) {
 		log.info(
 			{ root: sessionsCfg.root, allowlist: sessionsCfg.allowlist.length },

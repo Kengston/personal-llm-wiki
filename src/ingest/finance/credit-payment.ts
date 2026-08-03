@@ -17,7 +17,7 @@
  *   - Подробные комментарии на русском, в стиле src/ingest/finance/*.
  */
 
-import { Ledger } from './ledger.js';
+import type { FinanceLedger } from './ledger.js';
 import {
 	addMonthsToIso,
 	splitPayment,
@@ -34,7 +34,7 @@ import { deterministicId } from './normalize.js';
  */
 export interface CreditPaymentDeps {
 	/** ledger — экземпляр Ledger для чтения и записи JSONL-файлов. */
-	ledger: Ledger;
+	ledger: FinanceLedger;
 	/** nowFn — инъекция времени (дефолт: () => new Date()). */
 	nowFn?: () => Date;
 }

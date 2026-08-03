@@ -60,6 +60,8 @@ function fakeTelegram(getUpdates: TelegramClient['getUpdates']): TelegramClient 
 		async sendPhoto() {},
 		async sendDocument() {},
 		async answerCallbackQuery() {},
+		async editMessageText() {},
+		async editMessageReplyMarkup() {},
 		async sendChatAction() {},
 		async getMe() {
 			return {};
@@ -84,7 +86,7 @@ describe('runPoller', () => {
 			return [];
 		});
 		const store = makeStore();
-		const state = new BridgeState(makeSettings(), dummyEngine, store, telegram);
+		const state = new BridgeState({ settings: makeSettings(), engine: dummyEngine, store: store, telegram: telegram });
 
 		await runPoller(state, controller.signal);
 
@@ -103,7 +105,7 @@ describe('runPoller', () => {
 		});
 		const store = makeStore();
 		store.setOffset(500);
-		const state = new BridgeState(makeSettings(), dummyEngine, store, telegram);
+		const state = new BridgeState({ settings: makeSettings(), engine: dummyEngine, store: store, telegram: telegram });
 
 		await runPoller(state, controller.signal);
 
@@ -118,7 +120,7 @@ describe('runPoller', () => {
 			calls++;
 			return [];
 		});
-		const state = new BridgeState(makeSettings(), dummyEngine, makeStore(), telegram);
+		const state = new BridgeState({ settings: makeSettings(), engine: dummyEngine, store: makeStore(), telegram: telegram });
 
 		await runPoller(state, controller.signal);
 

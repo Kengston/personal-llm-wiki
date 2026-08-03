@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { Ledger } from '../ingest/finance/ledger.js';
+import { createLedger } from '../ingest/finance/ledger.js';
 import type { Settings } from './config.js';
 import { BridgeState, buildApp, extractJob, handleJob, startWorkers, stopBridge } from './app.js';
 import { type Engine, EngineError, type EngineResult } from './engine.js';
@@ -40,6 +40,8 @@ class FakeTelegram implements TelegramClient {
 	photos: { chatId: number }[] = [];
 	documents: { chatId: number }[] = [];
 	answeredCallbacks: string[] = [];
+	editedMessages: { chatId: number; messageId: number; text: string }[] = [];
+	editedMarkups: { chatId: number; messageId: number }[] = [];
 	me: Record<string, unknown> = { username: 'second_brain_bot' };
 	getMeError: Error | null = null;
 	private waiters: (() => void)[] = [];
@@ -56,6 +58,12 @@ class FakeTelegram implements TelegramClient {
 	}
 	async answerCallbackQuery(callbackQueryId: string): Promise<void> {
 		this.answeredCallbacks.push(callbackQueryId);
+	}
+	async editMessageText(chatId: number, messageId: number, text: string): Promise<void> {
+		this.editedMessages.push({ chatId, messageId, text });
+	}
+	async editMessageReplyMarkup(chatId: number, messageId: number): Promise<void> {
+		this.editedMarkups.push({ chatId, messageId });
 	}
 	async sendChatAction(chatId: number, action = 'typing'): Promise<void> {
 		this.actions.push({ chatId, action });
@@ -97,7 +105,7 @@ function makeState(overrides: Partial<Settings> = {}): {
 	const telegram = new FakeTelegram();
 	const store = new SessionStore(settings.dbPath);
 	openStores.push(store);
-	const state = new BridgeState(settings, engine, store, telegram);
+	const state = new BridgeState({ settings: settings, engine: engine, store: store, telegram: telegram });
 	return { state, engine, telegram };
 }
 
@@ -346,8 +354,8 @@ describe('handleJob', () => {
 		// Создаём tmp-каталог для леджера.
 		const ledgerDir = mkdtempSync(join(tmpdir(), 'app-fcb-test-'));
 		try {
-			const financeLedger = new Ledger({
-				financeDir: ledgerDir,
+			const financeLedger = createLedger({
+				dir: ledgerDir,
 				publicRepoRoot: join(tmpdir(), 'fake-public-for-fcb-test'),
 			});
 
@@ -368,7 +376,7 @@ describe('handleJob', () => {
 			openStores.push(store);
 
 			// BridgeState с financeLedger — финансовый диспетчер активен.
-			const state = new BridgeState(settings, engine, store, tg, undefined, undefined, undefined, financeLedger);
+			const state = new BridgeState({ settings: settings, engine: engine, store: store, telegram: tg, financeLedger: financeLedger });
 
 			// Нажимаем [Оплачено] по несуществующему кредиту:
 			// диспетчер запустится, не найдёт кредит, отправит сообщение об ошибке.
@@ -404,8 +412,8 @@ describe('handleJob — finance-intent диспетчер (ADR-0024)', () => {
 		// Создаём tmp-каталог для леджера (path-guard с фейковым публичным репо).
 		const ledgerDir = mkdtempSync(join(tmpdir(), 'app-finance-test-'));
 		try {
-			const financeLedger = new Ledger({
-				financeDir: ledgerDir,
+			const financeLedger = createLedger({
+				dir: ledgerDir,
 				// Заведомо другой путь → path-guard позволит запись в ledgerDir.
 				publicRepoRoot: join(tmpdir(), 'fake-public-for-app-test'),
 			});
@@ -439,7 +447,7 @@ describe('handleJob — finance-intent диспетчер (ADR-0024)', () => {
 			openStores.push(store);
 
 			// BridgeState с financeLedger — теперь шов активен.
-			const state = new BridgeState(settings, engine, store, telegram, undefined, undefined, undefined, financeLedger);
+			const state = new BridgeState({ settings: settings, engine: engine, store: store, telegram: telegram, financeLedger: financeLedger });
 
 			await handleJob(state, { chatId: 42, text: 'баланс сбера 99000 рублей' });
 
@@ -486,8 +494,8 @@ describe('handleJob — регресс: финансы не шумят без fi
 		// движка перезаписывается. Если extractFinanceIntent(answer)===null → res.answer не меняется.
 		const ledgerDir = mkdtempSync(join(tmpdir(), 'app-no-intent-test-'));
 		try {
-			const financeLedger = new Ledger({
-				financeDir: ledgerDir,
+			const financeLedger = createLedger({
+				dir: ledgerDir,
 				publicRepoRoot: join(tmpdir(), 'fake-public-for-no-intent-test'),
 			});
 
@@ -514,7 +522,7 @@ describe('handleJob — регресс: финансы не шумят без fi
 			openStores.push(store);
 
 			// BridgeState с financeLedger — шов активен, но ответ без finance-intent.
-			const state = new BridgeState(settings, engine, store, telegram, undefined, undefined, undefined, financeLedger);
+			const state = new BridgeState({ settings: settings, engine: engine, store: store, telegram: telegram, financeLedger: financeLedger });
 
 			await handleJob(state, { chatId: 42, text: 'просто поговорить' });
 
@@ -558,8 +566,8 @@ describe('handleJob — регресс: финансы не шумят без fi
 		// единого sendMessage — на этом и ловим, что диспетчер не вызвался.
 		const ledgerDir = mkdtempSync(join(tmpdir(), 'app-prefix-gate-test-'));
 		try {
-			const financeLedger = new Ledger({
-				financeDir: ledgerDir,
+			const financeLedger = createLedger({
+				dir: ledgerDir,
 				publicRepoRoot: join(tmpdir(), 'fake-public-for-prefix-gate-test'),
 			});
 
@@ -580,7 +588,7 @@ describe('handleJob — регресс: финансы не шумят без fi
 			openStores.push(store);
 
 			// BridgeState с financeLedger — финансовый диспетчер активен (восьмой аргумент).
-			const state = new BridgeState(settings, engine, store, tg, undefined, undefined, undefined, financeLedger);
+			const state = new BridgeState({ settings: settings, engine: engine, store: store, telegram: tg, financeLedger: financeLedger });
 
 			// Нефинансовый callback (нет 'fin:' префикса) при активных финансах.
 			await handleJob(state, {

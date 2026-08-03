@@ -30,7 +30,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { FxProvider } from '../ingest/finance/fx.js';
 
-import { Ledger } from '../ingest/finance/ledger.js';
+import { createLedger, type FinanceLedger } from '../ingest/finance/ledger.js';
 import { recordFinanceEntry } from '../ingest/finance/record.js';
 import {
 	writePendingCashSurvey,
@@ -56,10 +56,10 @@ const FAKE_NOW = new Date('2026-06-23T10:00:00Z');
 const fakeNowFn = () => FAKE_NOW;
 
 /** Создаёт Ledger в tmp-каталоге с отключённым path-guard (для тестов). */
-function makeTmpLedger(): { ledger: Ledger; dir: string } {
+function makeTmpLedger(): { ledger: FinanceLedger; dir: string } {
 	const dir = mkdtempSync(join(tmpdir(), 'finance-intent-test-'));
-	const ledger = new Ledger({
-		financeDir: dir,
+	const ledger = createLedger({
+		dir: dir,
 		// publicRepoRoot — заведомо другой путь → path-guard позволит запись в dir.
 		publicRepoRoot: join(tmpdir(), 'fake-public-repo'),
 	});
@@ -172,7 +172,7 @@ describe('extractFinanceIntent', () => {
 
 describe('dispatchFinanceIntent — запись в Ledger', () => {
 	let dir: string;
-	let ledger: Ledger;
+	let ledger: FinanceLedger;
 	let deps: FinanceIntentDeps;
 
 	beforeEach(() => {
@@ -373,7 +373,7 @@ describe('dispatchFinanceIntent — запись в Ledger', () => {
 
 describe('dispatchFinanceIntent — create_goal', () => {
 	let dir: string;
-	let ledger: Ledger;
+	let ledger: FinanceLedger;
 	let goalsDir: string;
 
 	beforeEach(() => {
@@ -481,7 +481,7 @@ describe('dispatchFinanceIntent — create_goal', () => {
 
 describe('dispatchFinanceIntent — query (read-only)', () => {
 	let dir: string;
-	let ledger: Ledger;
+	let ledger: FinanceLedger;
 	let deps: FinanceIntentDeps;
 
 	beforeEach(() => {
@@ -660,7 +660,7 @@ function writeGoalPage(
 
 describe('dispatchFinanceIntent — query goal_progress (с goalsDir)', () => {
 	let dir: string;
-	let ledger: Ledger;
+	let ledger: FinanceLedger;
 	let goalsDir: string;
 
 	beforeEach(() => {
@@ -1007,7 +1007,7 @@ describe('dispatchFinanceIntent — query goal_progress (с goalsDir)', () => {
 
 describe('formatReadback', () => {
 	let dir: string;
-	let ledger: Ledger;
+	let ledger: FinanceLedger;
 
 	beforeEach(() => {
 		const tmp = makeTmpLedger();
@@ -1101,7 +1101,7 @@ describe('formatReadback', () => {
 
 describe('E2E флоу: mock Engine → finance-intent → readback', () => {
 	let dir: string;
-	let ledger: Ledger;
+	let ledger: FinanceLedger;
 
 	beforeEach(() => {
 		const tmp = makeTmpLedger();
@@ -1218,7 +1218,7 @@ describe('E2E флоу: mock Engine → finance-intent → readback', () => {
 
 describe('buildFinanceContextSummary', () => {
 	let dir: string;
-	let ledger: Ledger;
+	let ledger: FinanceLedger;
 
 	beforeEach(() => {
 		const tmp = makeTmpLedger();
@@ -1315,7 +1315,7 @@ describe('buildFinanceContextSummary', () => {
 
 describe('createGoalPage — path-guard публичного репо', () => {
 	let ledgerDir: string;
-	let ledger: Ledger;
+	let ledger: FinanceLedger;
 
 	beforeEach(() => {
 		const tmp = makeTmpLedger();
@@ -1418,6 +1418,8 @@ function makeMockTelegramClient() {
 			sentDocuments.push({ chatId, doc, opts });
 		}),
 		answerCallbackQuery: vi.fn(async () => {}),
+		editMessageText: vi.fn(async () => {}),
+		editMessageReplyMarkup: vi.fn(async () => {}),
 		sendChatAction: vi.fn(async () => {}),
 		getMe: vi.fn(async () => ({})),
 		getUpdates: vi.fn(async () => []),
@@ -1443,7 +1445,7 @@ function expectValidPngData(data: Buffer | Uint8Array | undefined): void {
 
 describe('dispatchFinanceIntent — реактивная доставка PNG (sendPhoto)', () => {
 	let dir: string;
-	let ledger: Ledger;
+	let ledger: FinanceLedger;
 
 	beforeEach(() => {
 		const tmp = makeTmpLedger();
@@ -1672,7 +1674,7 @@ describe('dispatchFinanceIntent — реактивная доставка PNG (s
 
 describe('dispatchFinanceIntent — pending-cash survey flow', () => {
 	let dir: string;
-	let ledger: Ledger;
+	let ledger: FinanceLedger;
 	let stateDir: string;
 
 	beforeEach(() => {
@@ -1854,7 +1856,7 @@ describe('tryParsePendingCashAnswer', () => {
 
 describe('dispatchFinanceIntent — create_credit (блокер #4)', () => {
 	let dir: string;
-	let ledger: Ledger;
+	let ledger: FinanceLedger;
 	let stateDir: string;
 
 	beforeEach(() => {
@@ -1982,7 +1984,7 @@ describe('dispatchFinanceIntent — create_credit (блокер #4)', () => {
 
 describe('dispatchFinanceIntent — idle watermark writeLastInputTs (блокер #8)', () => {
 	let dir: string;
-	let ledger: Ledger;
+	let ledger: FinanceLedger;
 	let stateDir: string;
 
 	beforeEach(() => {
@@ -2108,7 +2110,7 @@ describe('dispatchFinanceIntent — idle watermark writeLastInputTs (блоке�
 
 describe('batch-интент — dispatch и readback', () => {
 	let dir: string;
-	let ledger: Ledger;
+	let ledger: FinanceLedger;
 	let deps: FinanceIntentDeps;
 
 	beforeEach(() => {
@@ -2284,7 +2286,7 @@ describe('batch-интент — dispatch и readback', () => {
 
 describe('buildFinanceContextSummary с goalsDir', () => {
 	let dir: string;
-	let ledger: Ledger;
+	let ledger: FinanceLedger;
 	let goalsDir: string;
 
 	beforeEach(() => {
@@ -2384,7 +2386,7 @@ describe('buildFinanceContextSummary с goalsDir', () => {
 
 describe('buildFinanceContextSummary — секция «Счета:» (дефект S7)', () => {
 	let dir: string;
-	let ledger: Ledger;
+	let ledger: FinanceLedger;
 
 	beforeEach(() => {
 		const tmp = makeTmpLedger();

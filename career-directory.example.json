@@ -1,0 +1,17 @@
+{
+  "_comment": "Пример справочника рендера (ADR-0028, D3). Реальный файл — career-directory.local.json рядом с приватным контентом; в репозиториях он не хранится. Все значения ниже синтетические: example.com, Acme. Чеклист нужных ключей под вашу базу даёт `pnpm career:directory`.",
+  "display_name": "Synthetic Owner",
+  "contacts": {
+    "email_primary": "owner@example.com",
+    "profile_public": "https://example.com/in/owner"
+  },
+  "orgs": {
+    "acme": "Acme"
+  },
+  "institutions": {
+    "synthetic-university": "Synthetic University"
+  },
+  "links": {
+    "project-repo": "https://example.com/repo"
+  }
+}

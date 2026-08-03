@@ -30,7 +30,7 @@ import { childLogger } from '../core/logger.js';
 import { chartSpec, type BalanceEntry, type CategoryEntry, type GoalProgressData } from '../ingest/finance/chart.js';
 import { createDefaultFxProvider, type FxProvider } from '../ingest/finance/fx.js';
 import { computeGoalProgress } from '../ingest/finance/goals.js';
-import { assertPathAllowed, Ledger, resolvePublicRepo } from '../ingest/finance/ledger.js';
+import { assertPathAllowed, resolvePublicRepo, type FinanceLedger } from '../ingest/finance/ledger.js';
 import { recordFinanceEntry } from '../ingest/finance/record.js';
 import { FinanceGoalSchema, type FinanceGoal, CreditRecordSchema, type AccountRecord } from '../ingest/finance/types.js';
 import { renderChartPng } from './finance-render.js';
@@ -429,7 +429,7 @@ export interface QueryContext {
  */
 export interface FinanceIntentDeps {
 	/** ledger — экземпляр Ledger для записи/чтения JSONL. В тестах: tmp-dir Ledger. */
-	ledger: Ledger;
+	ledger: FinanceLedger;
 	/** nowFn — функция текущего времени. В тестах: фиксированный момент. */
 	nowFn?: () => Date;
 	/**
@@ -1437,7 +1437,7 @@ function normalizeYamlDates(value: unknown): unknown {
  */
 async function buildQueryContext(
 	intent: z.infer<typeof QueryIntentSchema>,
-	ledger: Ledger,
+	ledger: FinanceLedger,
 	nowFn: () => Date,
 	goalsDir?: string,
 	fxInput?: FxProvider,
@@ -1803,7 +1803,7 @@ export function formatReadback(result: DispatchResult): string {
  * @param nowFn    — функция текущего времени
  */
 export function buildFinanceContextSummary(
-	ledger: Ledger,
+	ledger: FinanceLedger,
 	goalsDir?: string,
 	nowFn: () => Date = () => new Date(),
 ): string | null {

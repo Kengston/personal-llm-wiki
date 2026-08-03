@@ -30,7 +30,7 @@ import { childLogger } from '../core/logger.js';
 import { chartSpec } from '../ingest/finance/chart.js';
 import { recordCreditPayment, type CreditPaymentResult } from '../ingest/finance/credit-payment.js';
 import { projectPayoffDate } from '../ingest/finance/credit.js';
-import { Ledger } from '../ingest/finance/ledger.js';
+import type { FinanceLedger } from '../ingest/finance/ledger.js';
 import {
 	resolveFinanceStateDir,
 	unmarkFiredByPrefix,
@@ -117,7 +117,7 @@ export interface FinanceCallbackDeps {
 	/** telegram — клиент Telegram для ответа и отправки. */
 	telegram: TelegramClient;
 	/** ledger — экземпляр Ledger для чтения/записи финансовых данных. */
-	ledger: Ledger;
+	ledger: FinanceLedger;
 	/** stateDir — каталог мутабельного состояния (.finance-state/). Опц.: дефолт из env. */
 	stateDir?: string;
 	/** nowFn — инъекция времени (дефолт: () => new Date()). */

@@ -34,13 +34,13 @@ process.env.CONTENT_ROOT = sandbox;
 process.env.WIKI_REPO_PATH = sandbox; // движок требует путь приватного репо (capture-write, ADR-0015)
 console.log('SANDBOX:', sandbox);
 
-const { Ledger } = await imp('ingest/finance/ledger.js');
+const { createLedger } = await imp('ingest/finance/ledger.js');
 const { buildEngineFromEnv } = await imp('bridge/engine.js');
 const { loadPersona, appendFinanceInstruction } = await imp('bridge/prompt.js');
 const { extractFinanceIntent, dispatchFinanceIntent, buildFinanceContextSummary, formatReadback } =
   await imp('bridge/finance-intent.js');
 
-const ledger = new Ledger({ env: process.env });
+const ledger = createLedger({ env: process.env });
 const nowFn = () => new Date();
 
 // Системный промпт — РОВНО как собирает main.ts (персона + контекст + finance-инструкция).
