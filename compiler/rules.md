@@ -31,6 +31,8 @@ Sanitizer — общий модуль [src/ingest/sanitizer.ts](../src/ingest/sa
 
 ## 3. Анатомия страницы по типам (контент-модель [ADR-0010](../docs/adr/0010-wiki-content-model.md))
 
+> **Схема конкретной инсталляции живёт в её `CLAUDE.md`, не здесь.** Типы страниц ниже — generic-база фреймворка. Конкретная инсталляция (личный контент-репозиторий) вправе расширять её собственными типами страниц и собственными полками в своём `CLAUDE.md` — например `platform`/`source`/`transcript` и полки `work/`/`learning/`/`docs/` ([ADR-0032](../docs/adr/0032-storage-self-contained-schema.md)). Этот файл остаётся generic-шаблоном: он не знает полок конкретной инсталляции и не проверяет соответствие им при работе с чужим корнем.
+
 Все страницы — markdown + YAML-frontmatter. **Общие поля frontmatter:** `title`, `type`, `status` (`draft|active|verified|stale|superseded|archived`), `last_updated` (ISO). Содержательные страницы заканчиваются `## Связанные` (relative-ссылки). Страницы с фактами держат массив `claims:` (§4).
 
 Файлы именуются `kebab-case` латиницей по транслиту (`people/ivan-primer.md`) — стабильно для ссылок; человеко-имя живёт в `title`.
@@ -557,6 +559,7 @@ Verbs: `ingest` · `note` (capture) · `query` · `audit` (proactive digest) · 
 
 - [AGENTS.md](../AGENTS.md) · [CLAUDE.md](../CLAUDE.md) · [CONTEXT.md](../CONTEXT.md)
 - [docs/adr/0008-engine-claude-native.md](../docs/adr/0008-engine-claude-native.md) · [docs/adr/0009-tos-safe-engine-access.md](../docs/adr/0009-tos-safe-engine-access.md) · [docs/adr/0010-wiki-content-model.md](../docs/adr/0010-wiki-content-model.md)
+- [docs/adr/0032-storage-self-contained-schema.md](../docs/adr/0032-storage-self-contained-schema.md) — схема конкретной инсталляции живёт в её `CLAUDE.md`, этот файл её не проверяет
 - [docs/adr/0002-no-embedder-pure-karpathy.md](../docs/adr/0002-no-embedder-pure-karpathy.md) · [docs/adr/0007-engine-spawn-and-scheduler.md](../docs/adr/0007-engine-spawn-and-scheduler.md)
 - [docs/research/memory-architecture.md](../docs/research/memory-architecture.md) · [docs/research/data-ingestion.md](../docs/research/data-ingestion.md)
 - [src/ingest/sanitizer.ts](../src/ingest/sanitizer.ts) · [src/ingest/watermark.ts](../src/ingest/watermark.ts) · [src/scheduler/lint-public.ts](../src/scheduler/lint-public.ts)
