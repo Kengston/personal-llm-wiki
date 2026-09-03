@@ -2,7 +2,7 @@
  * Парность с `scheduler/lint_public.py` ([ADR-0012]). PII-гейт: секреты/реальные
  * PII фейлят, синтетика/конфиг-чтение/пример-домены — нет. Все данные синтетические.
  */
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -85,5 +85,23 @@ describe('lint-public (PII-гейт)', () => {
 		write('bad.md', 'почта real.person@yandex.ru тут\n');
 		const offences = lint(dir);
 		expect(offences.some((o) => o.kind === 'email')).toBe(true);
+	});
+
+	it('lint() не заходит в локальное состояние инструментов (.autodev, .claude)', () => {
+		// Внутри — то, из-за чего эти папки и пропускаются: коммит-хэши, которые
+		// scan_secrets видит как entropy:hex. Файл того же вида в корне обязан
+		// фейлить — иначе тест доказывал бы не пропуск папки, а слепоту сканера.
+		for (const d of ['.autodev', '.claude']) {
+			mkdirSync(join(dir, d), { recursive: true });
+			writeFileSync(
+				join(dir, d, 'state.json'),
+				'{"base_commit": "d45a121f0e7b3c96a4d81250fbe6739ac2185d40"}\n',
+				'utf8',
+			);
+		}
+		expect(lint(dir)).toEqual([]);
+
+		write('state.json', '{"base_commit": "d45a121f0e7b3c96a4d81250fbe6739ac2185d40"}\n');
+		expect(lint(dir).length).toBeGreaterThanOrEqual(1);
 	});
 });
