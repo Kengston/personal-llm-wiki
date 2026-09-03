@@ -239,6 +239,31 @@ export interface RepeatApplication {
 	appliedAt: string;
 }
 
+/**
+ * UnexplainedGrowthEntry — запись, из-за которой распределение по стадиям выросло, но
+ * которая НЕ попала в {@link RepeatApplication} (находка ревью: отчёт печатал `repeatApplications`,
+ * а `allowedGrowth` считался ДРУГИМ множеством — `unexplainedNewIds`; расхождение оставалось
+ * невидимым владельцу — ноль повторов в отчёте при выросшей на 2 гистограмме).
+ *
+ * Природа роста здесь другая, чем у -rN: `repeatApplications` — это цепочка ПРИСВОЕНИЯ id по
+ * (external_id, company_id) — несколько occurrences с одинаковой парой делят один external_id
+ * и получают суффикс. Запись из ЭТОГО списка — occurrences, у которых external_id (после
+ * разбора vacancy_ref) РАЗНЫЙ, но они делили ОДИН старый `application.id`, по которому
+ * `foldAll` считал «до»-слоты (`events.ts`: `result.set(app.id, ...)`). Одному старому id
+ * миграция сопоставляет несколько новых — ровно та прибавка, которую видит гистограмма, но
+ * без -rN суффикса вовсе (у каждого свой external_id, коллизии присвоения нет).
+ */
+export interface UnexplainedGrowthEntry {
+	/** Новый id, появившийся без единственного предшественника среди старых. */
+	newId: string;
+	/** Старый application.id, под которым «до» миграции существовал только ОДИН слот. */
+	oldId: string;
+	/** applied_at этой occurrence — то, что отличает её от предшественника под тем же oldId. */
+	appliedAt: string;
+	/** Новый id occurrence, которая и заняла единственный «до»-слот этого oldId (первая по applied_at). */
+	predecessorId: string;
+}
+
 export type NormalizationRule =
 	| 'submission_channel_easy_apply'
 	| 'submission_channel_company_site'
@@ -285,6 +310,8 @@ export interface MigrationReport {
 	companySlugCollisions: CompanySlugCollision[];
 	applicationAliases: AliasEntry[];
 	repeatApplications: RepeatApplication[];
+	/** Прибавка к гистограмме БЕЗ -rN — см. {@link UnexplainedGrowthEntry}. */
+	unexplainedGrowth: UnexplainedGrowthEntry[];
 	eventApplicationIdRewrites: Array<{ eventId: string; from: string; to: string }>;
 	normalizations: NormalizationNote[];
 	unparsedVacancyRefs: UnparsedVacancyRef[];
@@ -483,9 +510,10 @@ function isValidSlugId(value: unknown): value is string {
  * или длиннее 64 символов — реальный случай в леджере: три события со старым id
  * `<application_id>-<stage>` без обрезки, физически невалидным по схеме).
  *
- * Правило — то же самое, что уже видно на остальных id в файле (например
- * `freedom24-senior-php-developer-relocation-to-cyprus-billing-appl`, обрезанный ровно на
- * границе 64 символов): `<application_id>-<stage>` (или `<application_id>-<touch_kind>` для
+ * Правило — то же самое, что уже видно на остальных id в файле (например синтетическое
+ * `acme-senior-backend-developer-relocation-to-berlin-billing-appli` — обрезка полной строки
+ * `acme-senior-backend-developer-relocation-to-berlin-billing-application` ровно на границе
+ * 64 символов): `<application_id>-<stage>` (или `<application_id>-<touch_kind>` для
  * касания), обрезка ДО 64 символов, а при коллизии с уже занятым id — числовой суффикс
  * `-N`, который откусывает место у базовой строки, чтобы итог остался в лимите. Это НЕ
  * `eventId` из `src/bridge/jobsearch-intent.ts` (там — хэш содержимого для идемпотентности
@@ -797,19 +825,27 @@ export function planMigration(input: MigrationInputRecords): MigrationPlan {
 	// `repeatApplications`, хотя НИ ОДИН id уже не меняется (на входе такого прогона старые
 	// id уже различны — хвост `-rN` уже в самом id). Рост, посчитанный по старому id, в
 	// этом случае честно даёт 0 — «до»-слотов здесь уже два, а не один.
-	const unexplainedNewIds = new Set<string>(); // «поимённо»: новые id без предшественника среди старых
+	// «Поимённо», а не глобальным скаляром (находка ревью §MAJOR: отчёт печатал
+	// `repeatApplications: 0`, а гистограмма росла на 2 — прибавка объяснялась ЭТИМ списком,
+	// который в `lines` не попадал вовсе; см. {@link UnexplainedGrowthEntry}).
+	const unexplainedGrowth: UnexplainedGrowthEntry[] = [];
 	for (const occs of occurrencesByOldId.values()) {
 		if (occs.length <= 1) continue; // единственная occurrence на старый id — предшественник есть, роста нет
 		const ordered = [...occs].sort((a, b) => a.appliedAt.localeCompare(b.appliedAt));
 		// Первая (по времени) occurrence — законный предшественник слота, который уже
 		// существовал «до». Остальные — новые слоты БЕЗ предшественника: единственный слот
 		// на этот старый id уже занят первой.
+		const predecessor = ordered[0]!;
+		const predecessorId =
+			applicationIdMap.get(occurrenceKey(predecessor.oldId, predecessor.appliedAt)) ?? predecessor.oldId;
 		for (const occ of ordered.slice(1)) {
 			const newId = applicationIdMap.get(occurrenceKey(occ.oldId, occ.appliedAt));
-			if (newId) unexplainedNewIds.add(newId);
+			if (newId) {
+				unexplainedGrowth.push({ newId, oldId: occ.oldId, appliedAt: occ.appliedAt, predecessorId });
+			}
 		}
 	}
-	const allowedGrowth = unexplainedNewIds.size;
+	const allowedGrowth = unexplainedGrowth.length;
 
 	// Инъективность applicationIdMap: два РАЗНЫХ occurrence не имеют права молча
 	// схлопнуться в один и тот же новый id. Группировка по (external_id, company_id) выше
@@ -1057,7 +1093,8 @@ export function planMigration(input: MigrationInputRecords): MigrationPlan {
 			`коллизий слага: ${companySlugCollisions.length})`,
 		`Отклики: ${invariant.before.applications} → ${invariant.after.applications} ` +
 			`(алиасов: ${applicationAliases.length}, повторов -rN: ${repeatApplications.length}, ` +
-			`неразобранных ссылок: ${unparsedVacancyRefs.length})`,
+			`неразобранных ссылок: ${unparsedVacancyRefs.length}, ` +
+			`роста без -rN: ${unexplainedGrowth.length})`,
 		`События: ${invariant.before.events} → ${invariant.after.events} ` +
 			`(переписанных ссылок application_id: ${eventApplicationIdRewrites.length})`,
 		'',
@@ -1097,6 +1134,21 @@ export function planMigration(input: MigrationInputRecords): MigrationPlan {
 				`  ${label} — ${normalizations.filter((n) => n.rule === rule).length} раз`,
 		),
 		'',
+		// Названная ошибка ревью: гистограммы ниже растут (applied 347 → 349 на реальных
+		// данных), а «Повторные отклики (-rN)» выше при этом пуст — рост разрешает ДРУГОЕ
+		// множество (`unexplainedGrowth`, см. doc-комментарий {@link UnexplainedGrowthEntry}),
+		// которое раньше в `lines` не печаталось вовсе. Владелец обязан видеть КАЖДЫЙ такой
+		// id поимённо — тот же принцип, что уже применён к нормализациям и повторам выше.
+		'Рост без -rN (новые id без единственного предшественника среди старых):',
+		...(unexplainedGrowth.length > 0
+			? unexplainedGrowth.map(
+					(g) =>
+						`  ${g.newId} ← старый id ${g.oldId}, подан ${g.appliedAt} — под этим старым id уже ` +
+						`был отклик ${g.predecessorId} (более ранний по applied_at); «до» миграции foldAll ` +
+						`видел под этим id только один слот`,
+				)
+			: ['  (нет)']),
+		'',
 		'Распределение по стадиям (до):',
 		...formatHistogram(invariant.before.stageCounts),
 		'Распределение по стадиям (после):',
@@ -1117,6 +1169,7 @@ export function planMigration(input: MigrationInputRecords): MigrationPlan {
 			companySlugCollisions,
 			applicationAliases,
 			repeatApplications,
+			unexplainedGrowth,
 			eventApplicationIdRewrites,
 			normalizations,
 			unparsedVacancyRefs,

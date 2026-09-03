@@ -165,6 +165,43 @@ export interface FunnelReport {
 	sourceCoverage: string;
 }
 
+/**
+ * dedupeApplications — сводит строки леджера `applications.jsonl` по `id` в один отклик,
+ * СО СЛИЯНИЕМ полей ([ADR-0029]: append-only, перезапись — новая строка с тем же `id`).
+ *
+ * Без этого шага `computeFunnel` считает строки, а не отклики: в боевом леджере 436 строк
+ * на 410 уникальных `id` (25 групп, 26 лишних строк) — каждая перезапись задваивала
+ * знаменатель, числитель и любой разрез, в который попадал отклик.
+ *
+ * НЕ «последняя по `ts` побеждает целиком». В каждой из 25 наблюдаемых боевых групп именно
+ * у БОЛЕЕ ПОЗДНЕЙ по `ts` строки не хватает `applied_via` — перезапись писалась урезанным
+ * набором полей, а не полным дублем исходной записи. Наивный latest-wins чинит знаменатель,
+ * но стирает факт «где подал» ровно там, где он есть. Поэтому — слияние: `Object.assign` по
+ * строкам группы в порядке ВОЗРАСТАНИЯ `ts` даёт его напрямую, без отдельного списка
+ * «необязательных полей» — каждое поле в результате берёт значение из САМОЙ ПОЗДНЕЙ строки
+ * группы, которая его вообще определяет. Если поздняя строка поле не несёт (ключа нет в
+ * JSON — не `undefined`), `Object.assign` его не трогает, и остаётся значение из более
+ * ранней строки — а не пустота. Обязательные поля (`id`/`company_id`/…) в наблюдаемых
+ * группах совпадают у всех строк, поэтому итог для них не зависит от порядка.
+ *
+ * @param applications — как есть из `ledger.readAll('applications')`, возможны повторы `id`
+ */
+export function dedupeApplications(applications: ApplicationRecord[]): ApplicationRecord[] {
+	const groups = new Map<string, ApplicationRecord[]>();
+	for (const app of applications) {
+		const list = groups.get(app.id);
+		if (list) list.push(app);
+		else groups.set(app.id, [app]);
+	}
+
+	const merged: ApplicationRecord[] = [];
+	for (const rows of groups.values()) {
+		const byTsAscending = [...rows].sort((a, b) => a.ts.localeCompare(b.ts));
+		merged.push(Object.assign({}, ...byTsAscending) as ApplicationRecord);
+	}
+	return merged;
+}
+
 export interface FunnelOptions {
 	/** Момент, на который считаем. Аргумент, а не часы внутри — отчёт воспроизводим. */
 	asOf: string;
@@ -205,7 +242,12 @@ export function computeFunnel(
 	// ЕДИНСТВЕННЫЙ фильтр касаний — здесь. Дальше по коду `touchpoint` не существует,
 	// поэтому «забыть исключить касание» в отдельной метрике физически невозможно.
 	const stageEvents = events.filter((e) => e.kind === 'stage_change');
-	const states = foldAll(applications, stageEvents);
+	// ЕДИНСТВЕННОЕ место дедупа — здесь, до всех подсчётов (см. `dedupeApplications`).
+	// Дальше по коду параметр `applications` не используется вовсе — везде `deduped` —
+	// поэтому «посчитать по строке леджера вместо отклика» в отдельной метрике так же
+	// физически невозможно, как и забыть исключить касание строкой выше.
+	const deduped = dedupeApplications(applications);
+	const states = foldAll(deduped, stageEvents);
 
 	const byStage: Partial<Record<ApplicationStage, number>> = {};
 	const reachedStage: Partial<Record<ApplicationStage, number>> = {};
@@ -223,7 +265,7 @@ export function computeFunnel(
 		return state?.firstAt[stage];
 	};
 
-	for (const app of applications) {
+	for (const app of deduped) {
 		const state = states.get(app.id);
 		if (!state) continue;
 
@@ -267,7 +309,7 @@ export function computeFunnel(
 	for (const [from, to] of CONVERSION_PAIRS) {
 		let numerator = 0;
 		let denominator = 0;
-		for (const app of applications) {
+		for (const app of deduped) {
 			const fromAt = firstAtOf(app, from);
 			if (!fromAt) continue;
 			denominator++;
@@ -289,7 +331,7 @@ export function computeFunnel(
 		cutoffOf?: (key: string) => string | undefined,
 	) => {
 		const buckets = new Map<string, { total: number; replied: number; offer: number }>();
-		for (const app of applications) {
+		for (const app of deduped) {
 			const key = keyOf(app);
 			if (!key) continue;
 			const cutoff = cutoffOf?.(key);
@@ -314,7 +356,7 @@ export function computeFunnel(
 
 	return {
 		as_of: opts.asOf,
-		total: applications.length,
+		total: deduped.length,
 		byStage,
 		reachedStage,
 		conversions,
@@ -325,10 +367,13 @@ export function computeFunnel(
 			company_source: segment((a) => a.company_source),
 			submission_channel: segment((a) => a.submission_channel),
 			variant_id: segment((a) => a.variant_id),
-			platform: segment((a) => a.platform, (key) => platformCutoffs[key]),
+			platform: segment(
+				(a) => a.platform,
+				(key) => platformCutoffs[key],
+			),
 		},
 		reasons,
-		trendAllowed: applications.length >= TREND_N,
+		trendAllowed: deduped.length >= TREND_N,
 		sourceCoverage: `Показатели покрывают только подключённые источники (${sources.length}: ${sourceList}); полного среза рынка не существует.`,
 	};
 }

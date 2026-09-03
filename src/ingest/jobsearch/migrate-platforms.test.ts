@@ -18,6 +18,7 @@ import {
 	applyMigration,
 	diffStageCounts,
 	MigrationInvariantError,
+	MigrationValidationError,
 	parseVacancyRef,
 	planMigration,
 	type MigrationInputRecords,
@@ -122,9 +123,9 @@ describe('parseVacancyRef', () => {
 		// Находка ревью: у iCIMS путь ВСЕГДА кончается литералом `/job` — если брать
 		// последний сегмент не глядя, ЛЮБАЯ вакансия iCIMS даёт один и тот же external_id
 		// `icjob`. Значащий сегмент — число сразу после литерала `jobs`.
-		const parsed = parseVacancyRef('https://careers-hireright.icims.com/jobs/6853/security-engineer/job');
+		const parsed = parseVacancyRef('https://careers-acme.icims.com/jobs/70142/backend-engineer/job');
 		expect(parsed.platform).toBe('icims');
-		expect(parsed.externalId).toBe('ic6853');
+		expect(parsed.externalId).toBe('ic70142');
 	});
 
 	it('iCIMS: без сегмента jobs в пути — фолбэк на первый чисто числовой сегмент', () => {
@@ -401,35 +402,35 @@ describe('id отклика и повторный отклик', () => {
 
 describe('коллизия external_id при разных компаниях — не повтор (находка ревью)', () => {
 	it('iCIMS: три отклика в три разные компании с одинаковым хвостом /job не сливаются в одну вакансию', () => {
-		// Реальный случай из боевого леджера: icjob (HireRight, jobs/6853), icjob-r2
-		// (JAGGAER, jobs/4151), icjob-r3 (Nortal, jobs/5955) — три разных работодателя
-		// записались как повторные отклики на одну вакансию, потому что external_id
-		// брался как хвост пути (у всех троих `/job`). Оба под-фикса (значащий сегмент +
-		// группировка присвоения по company_id) нужны разом — этот тест проверяет их
-		// вместе, на исходном сценарии.
+		// Синтетическая реконструкция класса дефекта, найденного ревью на боевом леджере
+		// (сами компании и id вакансий здесь вымышленные — ADR-0003, реальная воронка
+		// владельца в публичный репозиторий не попадает): у iCIMS путь ВСЕГДА кончается
+		// литералом `/job`, и если брать хвост не глядя, три отклика в три РАЗНЫХ компании
+		// схлопнутся в один и тот же external_id `icjob`. Оба под-фикса (значащий сегмент +
+		// группировка присвоения по company_id) нужны разом — этот тест проверяет их вместе.
 		const plan = planMigration(
 			input({
 				companies: [
-					rawCompany('hireright', 'hireright.example.com'),
-					rawCompany('jaggaer', 'jaggaer.example.com'),
-					rawCompany('nortal', 'nortal.example.com'),
+					rawCompany('acme-screening', 'acme-screening.example.com'),
+					rawCompany('acme-procure', 'acme-procure.example.com'),
+					rawCompany('acme-consulting', 'acme-consulting.example.com'),
 				],
 				applications: [
-					rawApplication('app-hr', 'hireright', {
-						vacancy_ref: 'https://careers-hireright.icims.com/jobs/6853/role/job',
+					rawApplication('app-1', 'acme-screening', {
+						vacancy_ref: 'https://careers-acme-screening.icims.com/jobs/8001/role/job',
 					}),
-					rawApplication('app-jg', 'jaggaer', {
-						vacancy_ref: 'https://careers-jaggaer.icims.com/jobs/4151/role/job',
+					rawApplication('app-2', 'acme-procure', {
+						vacancy_ref: 'https://careers-acme-procure.icims.com/jobs/8002/role/job',
 					}),
-					rawApplication('app-nt', 'nortal', {
-						vacancy_ref: 'https://careers-nortal.icims.com/jobs/5955/role/job',
+					rawApplication('app-3', 'acme-consulting', {
+						vacancy_ref: 'https://careers-acme-consulting.icims.com/jobs/8003/role/job',
 					}),
 				],
 			}),
 		);
 
 		const ids = plan.applications.map((a) => a.id).sort();
-		expect(ids).toEqual(['ic4151', 'ic5955', 'ic6853']);
+		expect(ids).toEqual(['ic8001', 'ic8002', 'ic8003']);
 		expect(plan.report.repeatApplications).toHaveLength(0);
 		expect(plan.report.validationErrors).toEqual([]);
 	});
@@ -759,6 +760,50 @@ describe('инвариант счётчиков и стадий', () => {
 		).toBe(1);
 	});
 
+	it('рост БЕЗ -rN — одна старая occurrence-группа даёт два новых id с разными external_id — печатается поимённо (находка ревью)', () => {
+		// Ровно сценарий реального леджера (02-migration-report.txt: applied 347 → 349,
+		// «Повторные отклики (-rN): (нет)»): repeatApplications пуст (external_id у двух
+		// occurrences РАЗНЫЙ — коллизии присвоения по (external_id, company_id) нет), но обе
+		// делят один старый application.id, и foldAll «до» видел под ним только один слот.
+		// unexplainedGrowth обязан объяснить эту прибавку поимённо, а не молчать при пустом
+		// repeatApplications, как это делал отчёт до фикса.
+		const plan = planMigration(
+			input({
+				companies: [rawCompany('acme', 'acme.example.com')],
+				applications: [
+					rawApplication('role-y', 'acme', {
+						vacancy_ref: 'https://hh.ru/vacancy/111',
+						applied_at: '2026-01-01T00:00:00Z',
+						ts: '2026-01-01T00:00:00Z',
+					}),
+					rawApplication('role-y', 'acme', {
+						vacancy_ref: 'https://hh.ru/vacancy/222',
+						applied_at: '2026-02-01T00:00:00Z',
+						ts: '2026-02-01T00:00:00Z',
+					}),
+				],
+			}),
+		);
+
+		expect(plan.report.repeatApplications).toHaveLength(0); // не -rN коллизия присвоения
+		expect(plan.report.invariant.ok).toBe(true); // прибавка объяснена, а не роняет инвариант
+		expect(plan.report.unexplainedGrowth).toHaveLength(1);
+		expect(plan.report.unexplainedGrowth[0]).toMatchObject({
+			newId: 'hh222',
+			oldId: 'role-y',
+			appliedAt: '2026-02-01T00:00:00Z',
+			predecessorId: 'hh111',
+		});
+
+		// Владелец обязан видеть это ИМЕНЕМ в отчёте, а не только числом «роста без -rN» в
+		// сводке — та же прибавка, что в реальном прогоне была видна лишь как расхождение
+		// между «Повторные отклики (-rN): (нет)» и выросшей гистограммой applied.
+		const text = plan.report.lines.join('\n');
+		expect(text).toContain('hh222');
+		expect(text).toContain('hh111');
+		expect(text).toContain('role-y');
+	});
+
 	it('прибавка, которую нечем объяснить разведёнными повторами, роняет инвариант', () => {
 		const raw = buildLedger();
 		const plan = planMigration(raw);
@@ -916,6 +961,29 @@ describe('applyMigration', () => {
 
 		expect(existsSync(jobsearchDir)).toBe(false);
 	});
+
+	it('при провале финальной валидации applyMigration бросает MigrationValidationError и не создаёт каталог', () => {
+		// Зеркало теста провала инварианта выше: та же функция, но вторая защитная ветка
+		// (`plan.report.validationErrors.length > 0`) — до этого теста её не проверял
+		// никто, инвариант сабботировался, а валидация — нет.
+		const plan = samplePlan();
+		expect(plan.report.invariant.ok).toBe(true); // инвариант чист — падать должна ИМЕННО валидация
+		const sabotaged: MigrationPlan = {
+			...plan,
+			report: {
+				...plan.report,
+				validationErrors: [
+					{ recordType: 'application', id: 'hh136857307', message: 'искусственный провал теста' },
+				],
+			},
+		};
+
+		expect(() =>
+			applyMigration(sabotaged, { dir: jobsearchDir, publicRepoRoot: join(tmpDir, 'public-fake') }),
+		).toThrow(MigrationValidationError);
+
+		expect(existsSync(jobsearchDir)).toBe(false);
+	});
 });
 
 // ---------------------------------------------------------------------------
@@ -977,9 +1045,11 @@ describe('report.lines перечисляет повторы, неразобра
 		);
 		expect(plan.report.repeatApplications).toEqual([]);
 		expect(plan.report.unparsedVacancyRefs).toEqual([]);
+		expect(plan.report.unexplainedGrowth).toEqual([]);
 
 		const text = plan.report.lines.join('\n');
 		expect(text).toContain('Повторные отклики (-rN):\n  (нет)');
 		expect(text).toContain('Неразобранные ссылки vacancy_ref:\n  (нет)');
+		expect(text).toContain('Рост без -rN (новые id без единственного предшественника среди старых):\n  (нет)');
 	});
 });

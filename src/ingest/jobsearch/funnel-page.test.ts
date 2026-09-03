@@ -82,13 +82,23 @@ describe('renderFunnelPage', () => {
 
 		// По стадиям: и текущая (applied для a2), и промежуточные (screening для a1),
 		// и конечная (offer для a1) — знаменатели конверсий, а не только «сейчас».
-		expect(page).toContain(`| Отклик подан | ${report.byStage.applied ?? 0} | ${report.reachedStage.applied} |`);
-		expect(page).toContain(`| Скрининг | ${report.byStage.screening ?? 0} | ${report.reachedStage.screening} |`);
-		expect(page).toContain(`| Оффер | ${report.byStage.offer ?? 0} | ${report.reachedStage.offer} |`);
+		expect(page).toContain(
+			`| Отклик подан | ${report.byStage.applied ?? 0} | ${report.reachedStage.applied} |`,
+		);
+		expect(page).toContain(
+			`| Скрининг | ${report.byStage.screening ?? 0} | ${report.reachedStage.screening} |`,
+		);
+		expect(page).toContain(
+			`| Оффер | ${report.byStage.offer ?? 0} | ${report.reachedStage.offer} |`,
+		);
 
 		// Конверсии — та же текстовая форма, что даёт formatRate (единственная допустимая).
-		expect(page).toContain(formatRate(report.conversions['applied→replied']!, { withInterval: true }));
-		expect(page).toContain(formatRate(report.conversions['interview→offer']!, { withInterval: true }));
+		expect(page).toContain(
+			formatRate(report.conversions['applied→replied']!, { withInterval: true }),
+		);
+		expect(page).toContain(
+			formatRate(report.conversions['interview→offer']!, { withInterval: true }),
+		);
 
 		// TTFR и ghost — числа из DurationStat/Rate долетели, а не потерялись при рендере.
 		expect(page).toContain(String(report.ttfrDays.n));
@@ -106,16 +116,26 @@ describe('renderFunnelPage', () => {
 		// в принципе нельзя было бы такой проверкой пропустить.
 		const apps = [application('a1'), application('a2', { submission_channel: 'referral' })];
 		const events = [stageEvent('a1', 'replied', '2026-06-05T00:00:00Z')];
-		const report = computeFunnel(apps, events, { asOf: ASOF, ghostAfterDays: 21, connectedSources: ['manual'] });
+		const report = computeFunnel(apps, events, {
+			asOf: ASOF,
+			ghostAfterDays: 21,
+			connectedSources: ['manual'],
+		});
 
 		const page = renderFunnelPage(report, OPTS);
 
-		const linesWithPercentButNoN = page.split('\n').filter((line) => /\d+ %/.test(line) && !line.includes('из'));
+		const linesWithPercentButNoN = page
+			.split('\n')
+			.filter((line) => /\d+ %/.test(line) && !line.includes('из'));
 		expect(linesWithPercentButNoN).toEqual([]);
 	});
 
 	it('пустой отчёт даёт валидную страницу с честным «данных нет», а не падение или пустоту', () => {
-		const report = computeFunnel([], [], { asOf: ASOF, ghostAfterDays: 21, connectedSources: ['manual'] });
+		const report = computeFunnel([], [], {
+			asOf: ASOF,
+			ghostAfterDays: 21,
+			connectedSources: ['manual'],
+		});
 
 		expect(() => renderFunnelPage(report, OPTS)).not.toThrow();
 		const page = renderFunnelPage(report, OPTS);
@@ -163,17 +183,31 @@ describe('renderFunnelPage', () => {
 	});
 
 	it('момент генерации берётся из opts, а не из текущего времени — last_updated следует за generatedAt', () => {
-		const report = computeFunnel([], [], { asOf: ASOF, ghostAfterDays: 21, connectedSources: ['manual'] });
+		const report = computeFunnel([], [], {
+			asOf: ASOF,
+			ghostAfterDays: 21,
+			connectedSources: ['manual'],
+		});
 
-		const page = renderFunnelPage(report, { generatedAt: '2020-01-15T09:30:00.000Z', command: 'x' });
+		const page = renderFunnelPage(report, {
+			generatedAt: '2020-01-15T09:30:00.000Z',
+			command: 'x',
+		});
 
 		expect(page).toContain('last_updated: 2020-01-15');
 		expect(page).toContain('Скомпилировано 2020-01-15T09:30:00.000Z');
 	});
 
 	it('раздел «По площадке» печатает реальный разрез из report.breakdowns.platform, а не констатацию пробела', () => {
-		const apps = [application('a1', { platform: 'hh' }), application('a2', { platform: 'linkedin' })];
-		const report = computeFunnel(apps, [], { asOf: ASOF, ghostAfterDays: 21, connectedSources: ['manual', 'hh'] });
+		const apps = [
+			application('a1', { platform: 'hh' }),
+			application('a2', { platform: 'linkedin' }),
+		];
+		const report = computeFunnel(apps, [], {
+			asOf: ASOF,
+			ghostAfterDays: 21,
+			connectedSources: ['manual', 'hh'],
+		});
 
 		const page = renderFunnelPage(report, OPTS);
 
@@ -208,9 +242,32 @@ describe('renderFunnelPage', () => {
 		expect(segmentHeader).toContain('Любая реакция');
 
 		// Обе величины на странице, под разными именами, с разными числами.
-		expect(report.breakdowns.platform.hh).toMatchObject({ replied: { numerator: 2, denominator: 2 } });
+		expect(report.breakdowns.platform.hh).toMatchObject({
+			replied: { numerator: 2, denominator: 2 },
+		});
 		expect(report.conversions['applied→replied']).toMatchObject({ numerator: 1, denominator: 2 });
-		expect(page).toContain(formatRate(report.breakdowns.platform.hh!.replied, { withInterval: true }));
-		expect(page).toContain(formatRate(report.conversions['applied→replied']!, { withInterval: true }));
+		expect(page).toContain(
+			formatRate(report.breakdowns.platform.hh!.replied, { withInterval: true }),
+		);
+		expect(page).toContain(
+			formatRate(report.conversions['applied→replied']!, { withInterval: true }),
+		);
+	});
+
+	it('раздел «Ограничения» не хардкодит конкретную площадку и дату отсечения — они приходят из реестра, не из рендерера', () => {
+		// Раньше текст утверждал буквально «у hh — 2026-09-01» независимо от того, что
+		// реально передано в опциях: рендерер — чистая функция над FunnelReport и не должен
+		// знать фактов из реестра площадок наперёд. Дата площадки живёт в
+		// wiki/jobsearch/platforms/*.md (поле since), не в тексте этого модуля.
+		const report = computeFunnel([application('a1')], [], {
+			asOf: ASOF,
+			ghostAfterDays: 21,
+			connectedSources: ['manual'],
+		});
+
+		const page = renderFunnelPage(report, OPTS);
+
+		expect(page).not.toContain('2026-09-01');
+		expect(page).not.toMatch(/у hh/);
 	});
 });

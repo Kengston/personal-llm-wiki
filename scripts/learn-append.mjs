@@ -14,8 +14,14 @@
  * Запуск:
  *   pnpm learn:append -- <ledger> [файл.jsonl] [--dry-run]
  *   cat reviews.jsonl | pnpm learn:append -- reviews
+ *   cat reviews.jsonl | pnpm learn:append
  *
- * <ledger> — один из: reviews
+ * <ledger> — один из: reviews. Позиционный ключ можно опустить: у учебного леджера сейчас
+ * ровно один файл (`LEARNING_LEDGER_FILES` — `{ reviews: 'reviews.jsonl' }`), и вся
+ * документация (скиллы, CLAUDE.md, README, ADR-0035) называет короткую форму без ключа.
+ * Дефолт выводится из словаря спецификации, а не хардкодится строкой `'reviews'`: как только
+ * у леджера появится второй файл, `LEDGER_KEYS.length` перестанет быть 1 и дефолт исчезнет
+ * сам — короткая форма снова потребует явный ключ, вместо того чтобы молча писать не туда.
  */
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -33,7 +39,14 @@ const LEDGER_KEYS = Object.keys(LEARNING_LEDGER_FILES);
 
 const args = process.argv.slice(2);
 const dryRun = args.includes('--dry-run');
-const [ledgerKey, filePath] = args.filter((a) => !a.startsWith('--'));
+let [ledgerKey, filePath] = args.filter((a) => !a.startsWith('--'));
+
+// Короткая форма из документации (`pnpm learn:append`, без позиционного ключа) подставляет
+// единственный ключ спецификации — но только когда он и правда единственный. Если ключ дан
+// явно (даже неверный), дефолт не вмешивается: ошибка «нет такого леджера» ниже видна как есть.
+if (!ledgerKey && LEDGER_KEYS.length === 1) {
+	ledgerKey = LEDGER_KEYS[0];
+}
 
 // Ни одна ветка ниже не зовёт process.exit(): вывод в канал асинхронен, и немедленный
 // выход обрубает его на границе буфера — список ошибок валидации приходил бы оборванным
