@@ -480,6 +480,10 @@ function checkSkillShelfPaths(root: string, skillsDir: string): LintFinding[] {
 			const topSegment = mentioned.split('/')[0] ?? '';
 			if (!SHELF_PREFIXES.has(topSegment)) continue;
 			if (mentioned.includes('<') || mentioned.includes('*')) continue; // шаблон/glob — не конкретный путь
+			// Скрытые каталоги внутри полки (`raw/.quarantine/`, `raw/.tasks/`) — рабочее
+			// состояние движка, которое он заводит при первой записи. Их отсутствие на
+			// диске означает «этим ещё не пользовались», а не мёртвую ссылку в скилле.
+			if (mentioned.split('/').some((seg) => seg.startsWith('.'))) continue;
 			if (existsSync(join(root, mentioned))) continue;
 			findings.push({
 				rule: 'skill-missing-shelf-path',

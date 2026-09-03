@@ -416,6 +416,17 @@ describe('--skills skill-missing-shelf-path', () => {
 		]);
 	});
 
+	it('не срабатывает на скрытом каталоге внутри полки — движок заводит его при первой записи', () => {
+		const skillsDir = join(tmpDir, 'skills', 'personal-llm-wiki');
+		mkdirSync(skillsDir, { recursive: true });
+		writeFileSync(
+			join(skillsDir, 'SKILL.md'),
+			'Хранилище llm-wiki-content: карантин в `raw/.quarantine/`, чоры в `raw/.tasks/`.\n',
+		);
+
+		expect(findingsOf('skill-missing-shelf-path', lintStorage(root, { skillsDir }))).toEqual([]);
+	});
+
 	it('игнорирует скилл, который это хранилище вообще не упоминает', () => {
 		// У скилла чужого проекта свои `docs/` и `raw/`, и они означают его репозиторий.
 		// Без этого отбора правило на живом каталоге выдавало два десятка находок по
