@@ -26,6 +26,7 @@ import {
 	type ApplicationEvent,
 	type ApplicationRecord,
 } from './events.js';
+import { FormAnswerRecordSchema, type FormAnswerRecord } from './form-answers.js';
 
 /** Имена файлов. Каталог без дефиса — `jobsearch`, как зафиксировано в глоссарии. */
 export const JOBSEARCH_LEDGER_FILES = {
@@ -33,6 +34,7 @@ export const JOBSEARCH_LEDGER_FILES = {
 	opportunities: 'opportunities.jsonl',
 	applications: 'applications.jsonl',
 	application_events: 'application_events.jsonl',
+	form_answers: 'form-answers.jsonl',
 } as const;
 
 export type JobsearchFileKey = keyof typeof JOBSEARCH_LEDGER_FILES;
@@ -42,6 +44,7 @@ export type JobsearchRecordMap = {
 	opportunities: OpportunityRecord;
 	applications: ApplicationRecord;
 	application_events: ApplicationEvent;
+	form_answers: FormAnswerRecord;
 };
 
 /**
@@ -62,6 +65,7 @@ export const JOBSEARCH_LEDGER: LedgerSpec<JobsearchRecordMap> = {
 		opportunities: OpportunityRecordSchema,
 		applications: ApplicationRecordSchema,
 		application_events: ApplicationEventSchema,
+		form_answers: FormAnswerRecordSchema,
 	},
 	resolveDir: resolveJobsearchDir,
 };

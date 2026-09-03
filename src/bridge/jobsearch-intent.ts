@@ -21,9 +21,11 @@ import { childLogger } from '../core/logger.js';
 import {
 	applyCompanyGates,
 	companyIdFromDomain,
+	companySource,
 	dedupeCompanies,
 	explainRank,
 	normalizeDomain,
+	platformId,
 	sourceCoverageLine,
 	type CompanyRecord,
 } from '../ingest/jobsearch/companies.js';
@@ -52,7 +54,12 @@ export const JobsearchIntentSchema = z.discriminatedUnion('type', [
 		type: z.literal('add_company'),
 		site: z.string().min(1).max(255),
 		name: z.string().min(1).max(200),
-		company_source: z.enum(['manual', 'linkedin_export', 'web_search']).default('manual'),
+		/**
+		 * Словарь импортируется из леджера ([ADR-0031] §1, [ADR-0033]). Литерал здесь
+		 * расходился с оригиналом — интент принимал значение, на котором потом падала
+		 * запись отклика, то есть уже после отправки.
+		 */
+		company_source: companySource.default('manual'),
 	}),
 
 	/** Ручной вес владельца 0–5. Вычисляемого балла в подсистеме нет. */
@@ -70,8 +77,12 @@ export const JobsearchIntentSchema = z.discriminatedUnion('type', [
 		opportunity_id: slugId.optional(),
 		role_title: z.string().min(1).max(200),
 		variant_id: slugId.optional(),
-		company_source: z.enum(['manual', 'linkedin_export', 'web_search']),
+		company_source: companySource,
 		submission_channel: z.enum(['referral', 'direct', 'inbound']),
+		platform: platformId.optional(),
+		external_id: z.string().max(64).optional(),
+		url: z.string().url().optional(),
+		applied_via: platformId.optional(),
 		vacancy_ref: z.string().max(500).optional(),
 		applied_at: isoTimestamp,
 		currency: z.string().min(1).max(10).optional(),
@@ -214,6 +225,10 @@ export function dispatchJobsearchIntent(
 				...(intent.variant_id ? { variant_id: intent.variant_id } : {}),
 				company_source: intent.company_source,
 				submission_channel: intent.submission_channel,
+				...(intent.platform ? { platform: intent.platform } : {}),
+				...(intent.external_id ? { external_id: intent.external_id } : {}),
+				...(intent.url ? { url: intent.url } : {}),
+				...(intent.applied_via ? { applied_via: intent.applied_via } : {}),
 				...(intent.vacancy_ref ? { vacancy_ref: intent.vacancy_ref } : {}),
 				applied_at: intent.applied_at,
 				...(intent.currency ? { currency: intent.currency } : {}),
