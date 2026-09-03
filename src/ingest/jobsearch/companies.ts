@@ -39,9 +39,19 @@ const slugId = z
 	.max(64)
 	.regex(/^[a-z0-9][a-z0-9_.-]*$/);
 
-/** Три канала добычи — ровно три (D4). Четвёртый не заводится без ADR. */
-export const COMPANY_SOURCES = ['manual', 'linkedin_export', 'web_search'] as const;
-const companySource = z.enum(COMPANY_SOURCES);
+/**
+ * Каналы добычи. Список закрытый: пятый не заводится без ADR (D4).
+ *
+ * `hh` добавлен [ADR-0031] — он назван поимённо, а не свёрнут в `web_search`, потому что
+ * строка покрытия (§ sourceCoverageLine, D11) обязана перечислять источники по именам,
+ * а hh — вдобавок другой рынок: рубли, российские юрлица, русскоязычные интервью.
+ *
+ * ЕДИНСТВЕННОЕ место, где живёт этот словарь. `applications.jsonl` ([ADR-0030]) импортирует
+ * его отсюда: второй литерал уже расходился с этим — источник проходил валидацию компании
+ * и падал на валидации отклика, то есть ПОСЛЕ того, как отклик был отправлен.
+ */
+export const COMPANY_SOURCES = ['manual', 'linkedin_export', 'web_search', 'hh'] as const;
+export const companySource = z.enum(COMPANY_SOURCES);
 
 /** Трёхзначный признак: `unknown` — легальное и частое состояние. */
 const triState = z.enum(['yes', 'no', 'unknown']);

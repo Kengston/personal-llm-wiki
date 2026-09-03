@@ -21,6 +21,8 @@
 
 import { z } from 'zod';
 
+import { companySource } from './companies.js';
+
 const isoTimestamp = z.string().min(1);
 const slugId = z
 	.string()
@@ -95,8 +97,12 @@ export const ApplicationRecordSchema = z.object({
 	 * а ради неё вариант и версионируется.
 	 */
 	variant_id: slugId.optional(),
-	/** Откуда узнали о компании. Словарь принадлежит [ADR-0029]. */
-	company_source: z.enum(['manual', 'linkedin_export', 'web_search']),
+	/**
+	 * Откуда узнали о компании. Словарь принадлежит [ADR-0029] и импортируется оттуда:
+	 * копия литерала здесь уже разъезжалась с оригиналом, и разъезд вскрывался на
+	 * валидации отклика — то есть после отправки ([ADR-0031] §1).
+	 */
+	company_source: companySource,
 	/** Как подавались. Имя поля `channel` в подсистеме не используется вовсе. */
 	submission_channel: z.enum(['referral', 'direct', 'inbound']),
 	/**
