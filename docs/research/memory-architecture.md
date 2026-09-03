@@ -56,7 +56,7 @@ LLM-as-judge на ингесте + помечать superseded-факты INVALI
 Держать one-line-саммари КОНКРЕТНЫМИ (расплывчатые → LLM берёт не ту страницу — реальный провал Nguyen на 77 стр.); шардить индекс по категории/домену; frontmatter-теги для дешёвого grep/Dataview-префильтра. Дают существенный запас под ~100-страничную отметку без новой инфраструктуры. (medium)
 
 ### Tension: wikilinks vs наш house style
-Сообщество пушит dual-link ([[wikilinks]] И markdown) + гибридный векторный поиск — против нашего house style (relative markdown + `## Связанные`, no-embedder). Пуш wikilinks обусловлен Obsidian-graph-view, не нуждой LLM — Codex парсит relative-markdown-ссылки нормально. **Остаёмся на relative-markdown; не принимать dual-linking/вектора только потому, что туториалы так делают.** (medium)
+Сообщество пушит dual-link (`[[wikilinks]]` И markdown) + гибридный векторный поиск — против нашего house style (relative markdown + `## Связанные`, no-embedder). Пуш wikilinks обусловлен Obsidian-graph-view, не нуждой LLM — Codex парсит relative-markdown-ссылки нормально. **Остаёмся на relative-markdown; не принимать dual-linking/вектора только потому, что туториалы так делают.** (medium)
 
 ## Сравнение подходов
 

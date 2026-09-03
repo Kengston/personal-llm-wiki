@@ -59,7 +59,11 @@ export interface LintFinding {
 }
 
 export interface LintOptions {
-	/** Каталог одного скилла (`SKILL.md` + `references/*.md`) — включает skill-* правила. */
+	/**
+	 * Корень обхода скиллов — включает skill-* правила. Гейт передаёт `~/.claude` ЦЕЛИКОМ, а
+	 * не каталог одного скилла: обход рекурсивный (`collectSkillDocs`), каждый скилл лежит в
+	 * своём подкаталоге ниже.
+	 */
 	skillsDir?: string;
 	/**
 	 * Только ссылочные правила: orphan-page, index-broken-link, wikilink-syntax,
@@ -425,16 +429,60 @@ const SKILL_SCAN_SKIP = new Set([
  * заходить в них значит проверять чужие правила своим уставом.
  */
 /**
- * Скилл считается говорящим про ЭТО хранилище, только если он его называет.
+ * Скилл считается говорящим про ЭТО хранилище, только если он его называет — ЛИБО
+ * строкой-маркером, ЛИБО backtick-путём на известную полку, ведущим в существующее дерево
+ * хранилища ([PLAN] находка 3).
  *
- * Без этого фильтра правило шумит на весь каталог скиллов: `docs/adr/`, `docs/phases/`,
- * `raw/` встречаются у скиллов совсем других проектов и означают там их собственные
- * репозитории. Находки «путь не существует» по чужим полкам не просто бесполезны — они
- * приучают пролистывать отчёт целиком, и тогда правило перестаёт работать и для своих.
+ * Одной строки-маркера мало: `jobsearch-system` называет полки хранилища (`raw/jobsearch/…`,
+ * `wiki/jobsearch/…`) кодом, а не прозой, и ни разу не пишет литерал `llm-wiki-content` —
+ * такой скилл раньше не проходил отбор вовсе, и НИ ОДНО из трёх skill-правил на него не
+ * смотрело, хотя это один из трёх скиллов, которые фаза 4 обязана проверить.
+ *
+ * Второй критерий (путь в СУЩЕСТВУЮЩЕЕ дерево) — не ослабление первого, а его дополнение:
+ * без проверки на диске совпадение имени первого сегмента ловило бы чужие скиллы тоже —
+ * `docs/phases/` из tutor-plus и `raw/` из совсем другого проекта называют СВОИ полки, а не
+ * эту. Существование на диске конкретно ЭТОГО хранилища отличает одно от другого.
  */
 const OWN_STORAGE_MARKER = /llm-wiki-content|Второ\w+ мозг/i;
 
-function collectSkillDocs(skillsDir: string): string[] {
+/**
+ * STORAGE_ROOT_PREFIXES — формы, которыми в тексте скилла может начинаться АБСОЛЮТНЫЙ путь
+ * к полке хранилища, помимо относительной («wiki/jobsearch/…»). Обе запланированные задачи
+ * (`jobsearch-daily`, `learn-review`) пишут пути ИСКЛЮЧИТЕЛЬНО тильда-формой
+ * `~/llm-wiki-content/…` — без среза этого префикса backtick-регулярка её вообще не видит:
+ * символ `~` не входил в класс символов, а `~/llm-wiki-content/wiki/…` для правила не путь
+ * к полке, а бессмысленный набор символов ([PLAN] находка 2).
+ */
+const STORAGE_ROOT_PREFIXES = ['~/llm-wiki-content/', '$CONTENT_ROOT/', join(homedir(), 'llm-wiki-content') + '/'];
+
+/** Backtick-путь: те же символы, что раньше, плюс `~` и `$` — начало форм корня хранилища выше. */
+const BACKTICK_PATH_RE = /`([~$a-zA-Z0-9_./-]+)`/g;
+
+/** stripStorageRootPrefix — срезает корень хранилища, если путь дан абсолютной формой; иначе возвращает как есть. */
+function stripStorageRootPrefix(mentioned: string): string {
+	for (const prefix of STORAGE_ROOT_PREFIXES) {
+		if (mentioned.startsWith(prefix)) return mentioned.slice(prefix.length);
+	}
+	return mentioned;
+}
+
+/** hasShelfPathIntoStorage — среди backtick-путей документа есть хотя бы один на известную полку, ведущий в дерево, которое реально существует под `root`. */
+function hasShelfPathIntoStorage(text: string, root: string): boolean {
+	for (const m of text.matchAll(BACKTICK_PATH_RE)) {
+		const tail = stripStorageRootPrefix(m[1]!);
+		// Голое имя полки — слово, а не путь. Без этой проверки в «свои» попадал любой
+		// скилл, где встречается токен `wiki` (у соседнего abcage-mcp-hub так называется
+		// MCP-сервер), и весь его чужой `docs/` начинал числиться мёртвыми путями хранилища.
+		const slash = tail.indexOf('/');
+		if (slash < 0 || slash === tail.length - 1) continue;
+		const topSegment = tail.slice(0, slash);
+		if (!SHELF_PREFIXES.has(topSegment)) continue;
+		if (existsSync(join(root, tail))) return true;
+	}
+	return false;
+}
+
+function collectSkillDocs(skillsDir: string, root: string): string[] {
 	const docs: string[] = [];
 	const walk = (dir: string, depth: number): void => {
 		if (depth > 6) return;
@@ -465,26 +513,36 @@ function collectSkillDocs(skillsDir: string): string[] {
 	for (const doc of docs) {
 		const skillRoot = skillRootOf(doc);
 		if (ownSkillRoots.has(skillRoot)) continue;
-		if (OWN_STORAGE_MARKER.test(readFileSync(doc, 'utf8'))) ownSkillRoots.add(skillRoot);
+		const text = readFileSync(doc, 'utf8');
+		if (OWN_STORAGE_MARKER.test(text) || hasShelfPathIntoStorage(text, root)) {
+			ownSkillRoots.add(skillRoot);
+		}
 	}
 	return docs.filter((doc) => ownSkillRoots.has(skillRootOf(doc)));
 }
 
-/** checkSkillShelfPaths — backtick-путь на известную полку, которого нет на диске хранилища. */
+/**
+ * checkSkillShelfPaths — backtick-путь на известную полку, которого нет на диске хранилища.
+ *
+ * Путь проверяется по ХВОСТУ после среза корня (`stripStorageRootPrefix`): сообщение находки
+ * при этом называет исходный текст `mentioned` целиком, тильда-формой как в скилле, — так
+ * находку проще сверить с оригиналом глазами, чем по обрезанному хвосту.
+ */
 function checkSkillShelfPaths(root: string, skillsDir: string): LintFinding[] {
 	const findings: LintFinding[] = [];
-	for (const doc of collectSkillDocs(skillsDir)) {
+	for (const doc of collectSkillDocs(skillsDir, root)) {
 		const text = readFileSync(doc, 'utf8');
-		for (const m of text.matchAll(/`([a-zA-Z0-9_./-]+)`/g)) {
+		for (const m of text.matchAll(BACKTICK_PATH_RE)) {
 			const mentioned = m[1]!;
-			const topSegment = mentioned.split('/')[0] ?? '';
+			const tail = stripStorageRootPrefix(mentioned);
+			const topSegment = tail.split('/')[0] ?? '';
 			if (!SHELF_PREFIXES.has(topSegment)) continue;
-			if (mentioned.includes('<') || mentioned.includes('*')) continue; // шаблон/glob — не конкретный путь
+			if (tail.includes('<') || tail.includes('*')) continue; // шаблон/glob — не конкретный путь
 			// Скрытые каталоги внутри полки (`raw/.quarantine/`, `raw/.tasks/`) — рабочее
 			// состояние движка, которое он заводит при первой записи. Их отсутствие на
 			// диске означает «этим ещё не пользовались», а не мёртвую ссылку в скилле.
-			if (mentioned.split('/').some((seg) => seg.startsWith('.'))) continue;
-			if (existsSync(join(root, mentioned))) continue;
+			if (tail.split('/').some((seg) => seg.startsWith('.'))) continue;
+			if (existsSync(join(root, tail))) continue;
 			findings.push({
 				rule: 'skill-missing-shelf-path',
 				path: relative(skillsDir, doc),
@@ -495,18 +553,31 @@ function checkSkillShelfPaths(root: string, skillsDir: string): LintFinding[] {
 	return findings;
 }
 
-const JSONL_WRITE_VERB_RE = /допиш\w*|запиш\w*|добав\w*\s+строк\w*|appendFileSync|writeFileSync/i;
+// `допис\w*` (инфинитив «дописать», деепричастие «дописывая») и `допиш\w*` (личные формы
+// «допишите», «допишет») — РАЗНЫЕ ветки одного корня в русском словоизменении: у второй буква
+// «ш» вместо «с» из-за чередования, общей подстроки короче пяти букв у них нет. Без первой
+// ветки инструкция «дописать строку в reviews.jsonl» не ловилась вовсе ([PLAN] находка 1).
+const JSONL_WRITE_VERB_RE = /допиш\w*|допис\w*|запиш\w*|добав\w*\s+строк\w*|appendFileSync|writeFileSync/i;
+/**
+ * SANCTIONED_CLI_RE снимает находку ТОЛЬКО на строке, где команда названа рядом — проверяется
+ * в одном цикле по строкам вместе с JSONL_WRITE_VERB_RE, а не по тексту документа целиком.
+ *
+ * Санкция по всему документу — ровно тот дефект, ради которого правило переписано: одно
+ * упоминание `pnpm jobsearch:append` где угодно в файле снимало находку со ВСЕГО документа,
+ * включая шаг 9 через восемь шагов после команды в шаге 1. А это ровно те три файла
+ * (jobsearch-run:123, jobsearch-daily:137, routine.md:46), ради которых правило заведено —
+ * они называют команду где-то в тексте, и старая проверка гасила себя на них целиком.
+ */
 const SANCTIONED_CLI_RE = /jobsearch:append|learn:append|jobsearch-append|learn-append/;
 
 /** checkSkillDirectJsonlWrite — инструкция дозаписать строку прямо в .jsonl, минуя CLI ([ADR-0035]). */
-function checkSkillDirectJsonlWrite(skillsDir: string): LintFinding[] {
+function checkSkillDirectJsonlWrite(root: string, skillsDir: string): LintFinding[] {
 	const findings: LintFinding[] = [];
-	for (const doc of collectSkillDocs(skillsDir)) {
-		const text = readFileSync(doc, 'utf8');
-		if (SANCTIONED_CLI_RE.test(text)) continue; // запись уже описана командой — ОК
-		const lines = text.split('\n');
+	for (const doc of collectSkillDocs(skillsDir, root)) {
+		const lines = readFileSync(doc, 'utf8').split('\n');
 		for (let i = 0; i < lines.length; i++) {
 			const line = lines[i]!;
+			if (SANCTIONED_CLI_RE.test(line)) continue; // команда названа на ЭТОЙ строке — ОК
 			if (/\.jsonl\b/.test(line) && JSONL_WRITE_VERB_RE.test(line)) {
 				findings.push({
 					rule: 'skill-direct-jsonl-write',
@@ -533,9 +604,9 @@ function checkSkillDirectJsonlWrite(skillsDir: string): LintFinding[] {
 const PLATFORM_ID_MENTION_RE =
 	/(?:platform|applied_via)\s*[:=]\s*`?([a-z][a-z0-9_-]{1,30})`?|platforms\/([a-z][a-z0-9_-]{1,30})\.md/g;
 
-function checkSkillPlatformMentions(skillsDir: string): LintFinding[] {
+function checkSkillPlatformMentions(root: string, skillsDir: string): LintFinding[] {
 	const findings: LintFinding[] = [];
-	for (const doc of collectSkillDocs(skillsDir)) {
+	for (const doc of collectSkillDocs(skillsDir, root)) {
 		const lines = readFileSync(doc, 'utf8').split('\n');
 		for (let i = 0; i < lines.length; i++) {
 			const line = lines[i]!;
@@ -578,8 +649,8 @@ export function lintStorage(root: string, opts: LintOptions = {}): LintFinding[]
 	if (opts.skillsDir) {
 		findings.push(
 			...checkSkillShelfPaths(root, opts.skillsDir),
-			...checkSkillDirectJsonlWrite(opts.skillsDir),
-			...checkSkillPlatformMentions(opts.skillsDir),
+			...checkSkillDirectJsonlWrite(root, opts.skillsDir),
+			...checkSkillPlatformMentions(root, opts.skillsDir),
 		);
 	}
 

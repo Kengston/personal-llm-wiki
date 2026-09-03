@@ -46,6 +46,7 @@ import {
 	companyIdFromDomain,
 	normalizeDomain,
 	CompanyRecordSchema,
+	DISCOVERY_PLATFORM_IDS,
 	PLATFORM_IDS,
 	type CompanyRecord,
 	type PlatformId,
@@ -99,6 +100,20 @@ function platformFromDomain(domain: string): PlatformId {
 	return 'site';
 }
 
+/**
+ * ATS_PLATFORM_IDS — площадки, чья ссылка на вакансию физически совпадает с формой подачи
+ * (находка ревью, [ADR-0033] §2). Aggregator/network ({@link DISCOVERY_PLATFORM_IDS}: hh,
+ * linkedin) — это место НАХОДКИ вакансии, а не подачи формы; `site`/`email` — тоже не про
+ * подачу через саму ссылку (длинный хвост карьерных страниц и почта ничего не гарантируют).
+ * Единственный класс, где «нашёл здесь» надёжно значит «подал здесь», — ATS: там ссылка на
+ * вакансию и есть страница с формой.
+ */
+const ATS_PLATFORM_IDS = new Set<PlatformId>(
+	PLATFORM_IDS.filter(
+		(id) => id !== 'site' && id !== 'email' && !DISCOVERY_PLATFORM_IDS.some((p) => p === id),
+	),
+);
+
 /** Разбор одного `vacancy_ref` в поля отклика. */
 export interface ParsedVacancyRef {
 	platform?: PlatformId;
@@ -110,11 +125,31 @@ export interface ParsedVacancyRef {
 const TAG_PATTERN = /^([a-z]+):(.+)$/i;
 
 /**
+ * meaningfulPathSegment — значащий сегмент пути вакансии, а не слепой хвост (находка
+ * ревью, [ADR-0033] §5). У iCIMS путь ВСЕГДА кончается литералом `/job`
+ * (`.../jobs/<N>/human-readable-title/job`) — три разных отклика в три разных компании
+ * получили один и тот же external_id `icjob`, если брать последний сегмент не глядя. Для
+ * площадок без такой оговорки последний сегмент по-прежнему годится (hh, linkedin — id там
+ * и есть последний сегмент, это уже покрыто тестами ниже).
+ */
+function meaningfulPathSegment(platform: PlatformId, segments: string[]): string | undefined {
+	if (platform === 'icims') {
+		const jobsIndex = segments.findIndex((s) => s.toLowerCase() === 'jobs');
+		if (jobsIndex !== -1 && segments[jobsIndex + 1]) return segments[jobsIndex + 1];
+		// Форма пути не совпала с ожидаемой — берём первый чисто числовой сегмент, а не
+		// хвост: id вакансии у iCIMS всегда число, а хвост почти всегда `job`.
+		return segments.find((s) => /^\d+$/.test(s));
+	}
+	return segments.length > 0 ? segments[segments.length - 1] : undefined;
+}
+
+/**
  * parseVacancyRef — детерминированный разбор старого `vacancy_ref` ([ADR-0033] §5).
  *
  * Две формы старых данных:
  *   - тег `platform:внешний_id` (площадка называется напрямую, без URL);
- *   - URL вакансии (площадка выводится из домена, внешний id — из последнего сегмента пути).
+ *   - URL вакансии (площадка выводится из домена, внешний id — из значащего сегмента пути,
+ *     см. {@link meaningfulPathSegment} — это не всегда последний сегмент).
  *
  * Пустая или неразбираемая ссылка не выбрасывает исключение: она возвращает `{}`,
  * а вызывающий сам решает, куда записать «не разобрано» ([ADR-0033] §5 — миграция
@@ -125,7 +160,12 @@ export function parseVacancyRef(ref: string | undefined): ParsedVacancyRef {
 	const trimmed = ref.trim();
 	if (!trimmed) return {};
 
-	const tagMatch = TAG_PATTERN.exec(trimmed);
+	// `TAG_PATTERN` матчит и URL со схемой (`https://...` — prefix тоже "похож на тег":
+	// `https`, хвост `//hh.ru/...`), поэтому тег-ветка обязана применяться ТОЛЬКО когда
+	// строка НЕ является URL со схемой http(s) — иначе она перехватывала бы любую ссылку
+	// раньше домена ниже.
+	const looksLikeUrl = /^https?:\/\//.test(trimmed);
+	const tagMatch = looksLikeUrl ? null : TAG_PATTERN.exec(trimmed);
 	if (tagMatch) {
 		const prefix = tagMatch[1]!.toLowerCase();
 		if ((PLATFORM_IDS as readonly string[]).includes(prefix)) {
@@ -134,6 +174,13 @@ export function parseVacancyRef(ref: string | undefined): ParsedVacancyRef {
 			const rawId = tagMatch[2]!.trim().replace(/[^a-zA-Z0-9._-]/g, '');
 			return { platform, externalId: idPrefix && rawId ? `${idPrefix}${rawId}` : undefined };
 		}
+		// Незнакомый префикс тега (`epam:`, `jazzhr:`, ...) — та же лестница, что и у ветки
+		// домена ниже: неизвестное схлопывается в `site` БЕЗ external_id, а площадку не
+		// теряет вовсе (находка ревью, [ADR-0033] §1). Продолжать в разбор домена нельзя:
+		// `prefix:rest` почти никогда не парсится как URL, и `normalizeDomain` на нём просто
+		// вернёт `null` — тогда функция потеряла бы даже то, что уже знает (это тег с
+		// известной структурой, а не мусор).
+		return { platform: 'site' };
 	}
 
 	const domain = normalizeDomain(trimmed);
@@ -145,7 +192,7 @@ export function parseVacancyRef(ref: string | undefined): ParsedVacancyRef {
 		const parsed = new URL(withScheme);
 		const url = `${parsed.origin}${parsed.pathname}`.replace(/\/+$/, '') || parsed.origin;
 		const segments = parsed.pathname.split('/').filter(Boolean);
-		const last = segments.length > 0 ? segments[segments.length - 1] : undefined;
+		const last = meaningfulPathSegment(platform, segments);
 		const idPrefix = EXTERNAL_ID_PREFIX[platform];
 		const rawId = last ? decodeURIComponent(last).replace(/[^a-zA-Z0-9._-]/g, '') : '';
 		const externalId = idPrefix && rawId ? `${idPrefix}${rawId}` : undefined;
@@ -327,16 +374,18 @@ export function diffStageCounts(
  * заводим). ОДНО правило на всю таблицу, а не своё для каждой строки:
  *
  *   - значение, которое является СИНОНИМОМ уже существующего члена словаря, приводится к
- *     нему (`remote_first`/`remote_global`/`remote_worldwide` — то же самое, что
- *     `remote_100`, просто другим словом; `remote_eu`/`remote_country` — то же самое, что
- *     `remote_country_bound`);
+ *     нему (`remote_global`/`remote_worldwide` — то же самое, что `remote_100`: оба прямо
+ *     называют отсутствие гео-привязки, просто другим словом; `remote_eu`/`remote_country`
+ *     — то же самое, что `remote_country_bound`);
  *   - значение, из которого нужный факт НЕ следует, уходит в штатный `unknown`/`other`, а
  *     не додумывается: `private` не говорит, какой раунд у компании; `product`/`scaleup`
  *     не говорят, какого она размера (словарь `company_type` различает продуктовые компании
- *     именно по размеру); голое `remote` не говорит, какой из трёх режимов
- *     (wfa/remote_100/remote_country_bound) имелся в виду; `es`/`it` — читаемые языки
- *     интервью, для которых словарь не заводит отдельных членов, а `other` под них и
- *     существует.
+ *     именно по размеру); голое `remote` И `remote_first` не говорят, какой из трёх режимов
+ *     (wfa/remote_100/remote_country_bound) имелся в виду — `remote_first` называет
+ *     ПОЛИТИКУ компании («по умолчанию удалённо»), а не гео-охват, и remote-first компания
+ *     вполне может при этом требовать привязку к стране (находка ревью: 19 из 444 записей);
+ *     `es`/`it` — читаемые языки интервью, для которых словарь не заводит отдельных членов,
+ *     а `other` под них и существует.
  *
  * Патчится ТОЛЬКО `.value` — `source`/`confirmed_at`/`confirmed_by_human` остаются как в
  * исходной записи: это происхождение факта, а не сам факт, и переименование значения его
@@ -348,7 +397,6 @@ const COMPANY_VALUE_SYNONYMS: ReadonlyArray<{
 	from: string;
 	to: string;
 }> = [
-	{ field: 'remote_mode', rule: 'company_remote_mode_normalized', from: 'remote_first', to: 'remote_100' },
 	{ field: 'remote_mode', rule: 'company_remote_mode_normalized', from: 'remote_global', to: 'remote_100' },
 	{
 		field: 'remote_mode',
@@ -364,9 +412,13 @@ const COMPANY_VALUE_SYNONYMS: ReadonlyArray<{
 	},
 	// remote_worldwide — синоним remote_100 (та же «без гео-привязки», другое слово).
 	{ field: 'remote_mode', rule: 'company_remote_mode_normalized', from: 'remote_worldwide', to: 'remote_100' },
-	// remote (без уточнения) — ни один из трёх реальных режимов (wfa/remote_100/
-	// remote_country_bound) из голого слова не следует; додумывать который — выдумывать факт.
+	// remote и remote_first — ни один из трёх реальных режимов (wfa/remote_100/
+	// remote_country_bound) из этих слов не следует; remote_first говорит про ПОЛИТИКУ
+	// (удалёнка по умолчанию), а не про гео-охват, и remote-first компания вполне может
+	// требовать привязку к стране. Додумывать который из трёх — выдумывать факт (находка
+	// ревью: 19 из 444 записей).
 	{ field: 'remote_mode', rule: 'company_remote_mode_normalized', from: 'remote', to: 'unknown' },
+	{ field: 'remote_mode', rule: 'company_remote_mode_normalized', from: 'remote_first', to: 'unknown' },
 	{ field: 'stage', rule: 'company_stage_normalized', from: 'series_b', to: 'series_b_plus' },
 	{ field: 'stage', rule: 'company_stage_normalized', from: 'series_c', to: 'series_b_plus' },
 	{ field: 'stage', rule: 'company_stage_normalized', from: 'early', to: 'seed' },
@@ -549,6 +601,13 @@ export function planMigration(input: MigrationInputRecords): MigrationPlan {
 		oldId: string;
 		candidate: RawRecord;
 		externalId?: string;
+		/**
+		 * Финальный (после переноса по карте алиасов) id компании. Нужен, чтобы отличать
+		 * повтор (тот же работодатель, та же вакансия) от коллизии external_id между
+		 * РАЗНЫМИ работодателями (находка ревью, [ADR-0033] §4) — см. группировку
+		 * occurrences ниже.
+		 */
+		companyId?: string;
 		appliedAt: string;
 		/** Для «latest wins» внутри перезаписи ([D: latest wins], как у dedupeCompanies). */
 		ts: string;
@@ -605,20 +664,31 @@ export function planMigration(input: MigrationInputRecords): MigrationPlan {
 			});
 		}
 
-		// applied_via: явное значение > способ подачи из submission_channel > площадка
-		// из ссылки (по умолчанию считаем, что подали там же, где нашли).
+		// applied_via: явное значение > способ подачи из submission_channel > ссылка на
+		// ATS (находка ревью, [ADR-0033] §2). ПЛОЩАДКА НАХОДКИ — не площадка подачи для
+		// aggregator/network (hh, linkedin): 21 отклик реально подал форму в LinkedIn
+		// (submission_channel: linkedin_easy_apply, читается через appliedViaFromChannel
+		// выше), а 167 — нашли вакансию в LinkedIn, но подали НЕ через её форму; молчаливое
+		// «подали там же, где нашли» стёрло бы единственный факт, который старые данные ещё
+		// различали. Для ATS ссылка НАДЁЖНЕЕ: страница вакансии ashby/greenhouse/... это и
+		// есть форма подачи, там площадка находки и подачи физически совпадают. Без сигнала
+		// поле остаётся пустым — пусто честнее домысла.
 		if (!isNonEmptyString(raw.applied_via)) {
 			if (appliedViaFromChannel) patch.applied_via = appliedViaFromChannel;
-			else if (parsedRef.platform) patch.applied_via = parsedRef.platform;
+			else if (parsedRef.platform && ATS_PLATFORM_IDS.has(parsedRef.platform)) {
+				patch.applied_via = parsedRef.platform;
+			}
 		}
 
 		const candidate: RawRecord = { ...raw, ...patch };
 		const externalId = isNonEmptyString(candidate.external_id) ? candidate.external_id : undefined;
+		const companyId = isNonEmptyString(candidate.company_id) ? candidate.company_id : undefined;
 		const appliedAt = isNonEmptyString(raw.applied_at) ? raw.applied_at : String(raw.ts ?? '');
 		works.push({
 			oldId,
 			candidate,
 			externalId,
+			companyId,
 			appliedAt,
 			ts: isNonEmptyString(raw.ts) ? raw.ts : appliedAt,
 		});
@@ -626,8 +696,8 @@ export function planMigration(input: MigrationInputRecords): MigrationPlan {
 
 	// Новый id: <external_id> напрямую (сам уже несёт буквенный префикс площадки, второй
 	// разделённый префикс не добавляем — так же, как уже сделано в hh.ts). Повторный
-	// отклик на ТУ ЖЕ вакансию (тот же external_id) получает суффикс `-rN` по порядку
-	// подачи ([ADR-0033] §4). Без внешнего id — старый id остаётся как есть.
+	// отклик на ТУ ЖЕ вакансию (тот же external_id, ТОТ ЖЕ работодатель) получает суффикс
+	// `-rN` по порядку подачи ([ADR-0033] §4). Без внешнего id — старый id остаётся как есть.
 	//
 	// ПЕРЕЗАПИСЬ vs ПОВТОРНЫЙ ОТКЛИК. Леджер append-only: несколько строк с одним старым
 	// id — необязательно два разных отклика. Строки с одним старым id И одним applied_at —
@@ -638,10 +708,20 @@ export function planMigration(input: MigrationInputRecords): MigrationPlan {
 	// совпал с прошлым, и такая пара «occurrence» разруливается -rN логикой ниже наравне с
 	// откликами на разные старые id. Поэтому единица группировки здесь — occurrence
 	// (oldId + applied_at), а не сырая строка и не голый oldId.
+	//
+	// ПОВТОР vs КОЛЛИЗИЯ (находка ревью). Одинаковый external_id при РАЗНЫХ company_id — не
+	// повтор: повтор значит тот же работодатель и та же вакансия, а два разных работодателя
+	// с одним external_id — это либо совпадение id-пространств разных ATS, либо брак
+	// разбора ссылки. Группировка ниже поэтому идёт по паре (external_id, company_id), а не
+	// по голому external_id: чужих работодателей в одну -rN цепочку не смешивает. Если при
+	// этом два независимых chain'а всё равно претендуют на один и тот же итоговый id — это
+	// ловит проверка инъективности applicationIdMap чуть ниже, а не -rN логика (для такой
+	// пары она и не должна срабатывать).
 	interface Occurrence {
 		oldId: string;
 		appliedAt: string;
 		externalId?: string;
+		companyId?: string;
 		works: AppWork[];
 	}
 	const occurrenceKey = (oldId: string, appliedAt: string): string => `${oldId} ${appliedAt}`;
@@ -661,22 +741,26 @@ export function planMigration(input: MigrationInputRecords): MigrationPlan {
 		occurrence.works.push(work);
 	}
 	for (const occurrence of occurrences.values()) {
-		occurrence.externalId = occurrence.works.reduce((best, w) => (w.ts >= best.ts ? w : best)).externalId;
+		const latest = occurrence.works.reduce((best, w) => (w.ts >= best.ts ? w : best));
+		occurrence.externalId = latest.externalId;
+		occurrence.companyId = latest.companyId;
 	}
 
 	const applicationIdMap = new Map<string, string>(); // occurrenceKey → новый id
 	const repeatApplications: RepeatApplication[] = [];
-	const byExternalId = new Map<string, Occurrence[]>();
+	const byExternalIdAndCompany = new Map<string, Occurrence[]>();
 	for (const occurrence of occurrences.values()) {
 		if (!occurrence.externalId) {
 			applicationIdMap.set(occurrenceKey(occurrence.oldId, occurrence.appliedAt), occurrence.oldId);
 			continue;
 		}
-		const group = byExternalId.get(occurrence.externalId) ?? [];
+		const groupKey = `${occurrence.externalId}::${occurrence.companyId ?? ''}`;
+		const group = byExternalIdAndCompany.get(groupKey) ?? [];
 		group.push(occurrence);
-		byExternalId.set(occurrence.externalId, group);
+		byExternalIdAndCompany.set(groupKey, group);
 	}
-	for (const [externalId, group] of byExternalId) {
+	for (const group of byExternalIdAndCompany.values()) {
+		const externalId = group[0]!.externalId!;
 		const ordered = [...group].sort(
 			(a, b) => a.appliedAt.localeCompare(b.appliedAt) || a.oldId.localeCompare(b.oldId),
 		);
@@ -693,6 +777,50 @@ export function planMigration(input: MigrationInputRecords): MigrationPlan {
 			}
 		});
 	}
+
+	// ---- Рост распределения и инъективность: поимённо, а не глобальным скаляром ----
+	//
+	// Названная ошибка ревью: `allowedGrowth = repeatApplications.length` — глобальный
+	// скаляр, не привязанный к тому, ГДЕ распределение выросло. `repeatApplications`
+	// отвечает на вопрос «какой id досталась цепочке ПРИСВОЕНИЯ выше» (группировка по
+	// external_id+company_id — нужна ради самой строки, которая запишется). Рост
+	// распределения — другой вопрос: «сколько СЛОТОВ видел foldAll до миграции», а он
+	// ключуется по `application.id` (`events.ts`, `foldAll`: `result.set(app.id, ...)`) —
+	// несколько строк с ОДНИМ старым id схлопываются в ОДИН слот независимо от того, на
+	// одну они вакансию или на разные. Поэтому рост считается ДРУГОЙ группировкой — по
+	// самому старому id (`occurrencesByOldId`, уже построена выше для resolveApplicationId
+	// ниже) — а не по цепочке присвоения; путать их и есть та ошибка, которую чинит блок.
+	//
+	// Доказательство расхождения — повторный (идемпотентный) прогон по уже мигрированным
+	// данным: `vacancy_ref` миграцией не меняется, поэтому цепочка присвоения по
+	// external_id+company_id по-прежнему видит пару occurrences и производит непустой
+	// `repeatApplications`, хотя НИ ОДИН id уже не меняется (на входе такого прогона старые
+	// id уже различны — хвост `-rN` уже в самом id). Рост, посчитанный по старому id, в
+	// этом случае честно даёт 0 — «до»-слотов здесь уже два, а не один.
+	const unexplainedNewIds = new Set<string>(); // «поимённо»: новые id без предшественника среди старых
+	for (const occs of occurrencesByOldId.values()) {
+		if (occs.length <= 1) continue; // единственная occurrence на старый id — предшественник есть, роста нет
+		const ordered = [...occs].sort((a, b) => a.appliedAt.localeCompare(b.appliedAt));
+		// Первая (по времени) occurrence — законный предшественник слота, который уже
+		// существовал «до». Остальные — новые слоты БЕЗ предшественника: единственный слот
+		// на этот старый id уже занят первой.
+		for (const occ of ordered.slice(1)) {
+			const newId = applicationIdMap.get(occurrenceKey(occ.oldId, occ.appliedAt));
+			if (newId) unexplainedNewIds.add(newId);
+		}
+	}
+	const allowedGrowth = unexplainedNewIds.size;
+
+	// Инъективность applicationIdMap: два РАЗНЫХ occurrence не имеют права молча
+	// схлопнуться в один и тот же новый id. Группировка по (external_id, company_id) выше
+	// не даёт цепочке присвоения смешать разных работодателей — но если совпадение всё же
+	// произошло (два независимых chain'а стартуют с одного и того же голого external_id),
+	// это обязана поймать явная проверка, а не только совпадение чисел в счётчиках ниже.
+	const newIdOccurrenceCounts = new Map<string, number>();
+	for (const newId of applicationIdMap.values()) {
+		newIdOccurrenceCounts.set(newId, (newIdOccurrenceCounts.get(newId) ?? 0) + 1);
+	}
+	const nonInjectiveApplicationIds = [...newIdOccurrenceCounts.entries()].filter(([, count]) => count > 1);
 
 	/**
 	 * resolveApplicationId — событие ссылается на СТАРЫЙ application_id, а не на occurrence.
@@ -895,9 +1023,10 @@ export function planMigration(input: MigrationInputRecords): MigrationPlan {
 	if (input.events.length !== migratedEvents.length) {
 		mismatches.push(`events: было ${input.events.length}, стало ${migratedEvents.length}`);
 	}
-	mismatches.push(
-		...diffStageCounts(beforeStageCounts, afterStageCounts, repeatApplications.length),
-	);
+	mismatches.push(...diffStageCounts(beforeStageCounts, afterStageCounts, allowedGrowth));
+	for (const [id, count] of nonInjectiveApplicationIds) {
+		mismatches.push(`отображение старый id → новый не инъективно: id "${id}" назначен ${count} раз`);
+	}
 
 	const invariant: MigrationInvariant = {
 		before: {
@@ -917,6 +1046,10 @@ export function planMigration(input: MigrationInputRecords): MigrationPlan {
 	};
 
 	const mergeGroups = companyAliases.reduce((set, a) => set.add(a.to), new Set<string>()).size;
+	const formatHistogram = (counts: Record<string, number>): string[] =>
+		Object.keys(counts)
+			.sort()
+			.map((stage) => `  ${stage}: ${counts[stage]}`);
 	const lines = [
 		'=== Миграция площадок: отчёт ===',
 		`Компании: ${invariant.before.companies} → ${invariant.after.companies} ` +
@@ -927,6 +1060,21 @@ export function planMigration(input: MigrationInputRecords): MigrationPlan {
 			`неразобранных ссылок: ${unparsedVacancyRefs.length})`,
 		`События: ${invariant.before.events} → ${invariant.after.events} ` +
 			`(переписанных ссылок application_id: ${eventApplicationIdRewrites.length})`,
+		'',
+		// Владелец обязан видеть КАЖДОЕ опасное решение поимённо, а не только «инвариант
+		// OK» (находка ревью) — повторы, неразобранные ссылки и обе гистограммы построчно,
+		// а не только числом в сводке выше.
+		'Повторные отклики (-rN):',
+		...(repeatApplications.length > 0
+			? repeatApplications.map(
+					(r) => `  ${r.assignedId} ← ${r.originalId} (база ${r.baseId}, подан ${r.appliedAt})`,
+				)
+			: ['  (нет)']),
+		'',
+		'Неразобранные ссылки vacancy_ref:',
+		...(unparsedVacancyRefs.length > 0
+			? unparsedVacancyRefs.map((u) => `  ${u.applicationId}: ${u.vacancyRef}`)
+			: ['  (нет)']),
 		'',
 		'Нормализации значений:',
 		...(
@@ -948,6 +1096,11 @@ export function planMigration(input: MigrationInputRecords): MigrationPlan {
 			([rule, label]) =>
 				`  ${label} — ${normalizations.filter((n) => n.rule === rule).length} раз`,
 		),
+		'',
+		'Распределение по стадиям (до):',
+		...formatHistogram(invariant.before.stageCounts),
+		'Распределение по стадиям (после):',
+		...formatHistogram(invariant.after.stageCounts),
 		'',
 		`Инвариант: ${invariant.ok ? 'OK' : 'НАРУШЕН'}`,
 		...invariant.mismatches.map((m) => `  ! ${m}`),

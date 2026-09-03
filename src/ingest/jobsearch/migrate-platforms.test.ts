@@ -109,6 +109,30 @@ describe('parseVacancyRef', () => {
 		expect(parsed.url).toBe('https://careers.example.com/jobs/42');
 	});
 
+	it('незнакомый префикс тега (epam:, jazzhr:, ...) → site без external_id, а не пустой объект', () => {
+		// Находка ревью: раньше незнакомый префикс проваливался в разбор ДОМЕНА
+		// (`normalizeDomain('epam:12345')` не даёт домена — там нет точки) и терял
+		// площадку вовсе, возвращая `{}`. Пять записей (`epam:`, `jazzhr:` и другие)
+		// оставались совсем без platform. Ведёт себя как ветка домена: неизвестное → site.
+		expect(parseVacancyRef('epam:12345')).toEqual({ platform: 'site' });
+		expect(parseVacancyRef('jazzhr:some-id')).toEqual({ platform: 'site' });
+	});
+
+	it('iCIMS: значащий сегмент — число из /jobs/<N>/, а не литерал /job на конце пути', () => {
+		// Находка ревью: у iCIMS путь ВСЕГДА кончается литералом `/job` — если брать
+		// последний сегмент не глядя, ЛЮБАЯ вакансия iCIMS даёт один и тот же external_id
+		// `icjob`. Значащий сегмент — число сразу после литерала `jobs`.
+		const parsed = parseVacancyRef('https://careers-hireright.icims.com/jobs/6853/security-engineer/job');
+		expect(parsed.platform).toBe('icims');
+		expect(parsed.externalId).toBe('ic6853');
+	});
+
+	it('iCIMS: без сегмента jobs в пути — фолбэк на первый чисто числовой сегмент', () => {
+		const parsed = parseVacancyRef('https://careers-x.icims.com/12345/some-title');
+		expect(parsed.platform).toBe('icims');
+		expect(parsed.externalId).toBe('ic12345');
+	});
+
 	it('пустая ссылка → поля не проставляются', () => {
 		expect(parseVacancyRef(undefined)).toEqual({});
 		expect(parseVacancyRef('')).toEqual({});
@@ -168,7 +192,6 @@ describe('нормализация значений компаний', () => {
 
 	it('remote_mode/stage/company_type: значения-синонимы приводятся к канoническому члену словаря, происхождение факта не трогается', () => {
 		const synonyms: Array<[field: string, from: string, to: string]> = [
-			['remote_mode', 'remote_first', 'remote_100'],
 			['remote_mode', 'remote_global', 'remote_100'],
 			['remote_mode', 'remote_eu', 'remote_country_bound'],
 			['remote_mode', 'remote_country', 'remote_country_bound'],
@@ -192,12 +215,16 @@ describe('нормализация значений компаний', () => {
 		}
 	});
 
-	it('stage: private, company_type: product, interview_language: es/it — факт не выводится из значения, уходит в unknown/other без словаря-расширения', () => {
+	it('stage: private, company_type: product, interview_language: es/it, remote_mode: remote_first — факт не выводится из значения, уходит в unknown/other без словаря-расширения', () => {
 		const noFact: Array<[field: string, from: string, to: string]> = [
 			['stage', 'private', 'unknown'],
 			['company_type', 'product', 'unknown'],
 			['interview_language', 'es', 'other'],
 			['interview_language', 'it', 'other'],
+			// remote_first называет ПОЛИТИКУ («по умолчанию удалённо»), а не гео-охват —
+			// remote-first компания вполне может требовать привязку к стране, ровно как и
+			// голое remote_mode: remote выше по файлу (находка ревью: 19 из 444 записей).
+			['remote_mode', 'remote_first', 'unknown'],
 		];
 
 		for (const [field, from, to] of noFact) {
@@ -209,12 +236,12 @@ describe('нормализация значений компаний', () => {
 	});
 
 	it('нормализация значения компании пишется в отчёт с правильным правилом', () => {
-		const plan = planMigration(input({ companies: [companyWithField('remote_mode', 'remote_first')] }));
+		const plan = planMigration(input({ companies: [companyWithField('remote_mode', 'remote_global')] }));
 		expect(plan.report.normalizations).toContainEqual(
 			expect.objectContaining({
 				rule: 'company_remote_mode_normalized',
 				recordType: 'company',
-				from: 'remote_first',
+				from: 'remote_global',
 				to: 'remote_100',
 			}),
 		);
@@ -372,6 +399,65 @@ describe('id отклика и повторный отклик', () => {
 	});
 });
 
+describe('коллизия external_id при разных компаниях — не повтор (находка ревью)', () => {
+	it('iCIMS: три отклика в три разные компании с одинаковым хвостом /job не сливаются в одну вакансию', () => {
+		// Реальный случай из боевого леджера: icjob (HireRight, jobs/6853), icjob-r2
+		// (JAGGAER, jobs/4151), icjob-r3 (Nortal, jobs/5955) — три разных работодателя
+		// записались как повторные отклики на одну вакансию, потому что external_id
+		// брался как хвост пути (у всех троих `/job`). Оба под-фикса (значащий сегмент +
+		// группировка присвоения по company_id) нужны разом — этот тест проверяет их
+		// вместе, на исходном сценарии.
+		const plan = planMigration(
+			input({
+				companies: [
+					rawCompany('hireright', 'hireright.example.com'),
+					rawCompany('jaggaer', 'jaggaer.example.com'),
+					rawCompany('nortal', 'nortal.example.com'),
+				],
+				applications: [
+					rawApplication('app-hr', 'hireright', {
+						vacancy_ref: 'https://careers-hireright.icims.com/jobs/6853/role/job',
+					}),
+					rawApplication('app-jg', 'jaggaer', {
+						vacancy_ref: 'https://careers-jaggaer.icims.com/jobs/4151/role/job',
+					}),
+					rawApplication('app-nt', 'nortal', {
+						vacancy_ref: 'https://careers-nortal.icims.com/jobs/5955/role/job',
+					}),
+				],
+			}),
+		);
+
+		const ids = plan.applications.map((a) => a.id).sort();
+		expect(ids).toEqual(['ic4151', 'ic5955', 'ic6853']);
+		expect(plan.report.repeatApplications).toHaveLength(0);
+		expect(plan.report.validationErrors).toEqual([]);
+	});
+
+	it('одинаковый external_id при РАЗНЫХ company_id — коллизия, а не повтор', () => {
+		// Изолированная проверка группировки присвоения по (external_id, company_id) без
+		// URL-разбора: external_id проставлен напрямую, чтобы не смешивать с находкой про
+		// iCIMS выше. Повтор значит тот же работодатель — двух разных здесь нет, поэтому
+		// в repeatApplications пары быть не должно. Но и молча слиться в одну строку/один
+		// id они не могут — коллизия обязана быть видна и валидацией, и инвариантом
+		// (инъективность отображения старый id → новый).
+		const plan = planMigration(
+			input({
+				companies: [rawCompany('acme', 'acme.example.com'), rawCompany('other', 'other.example.com')],
+				applications: [
+					rawApplication('app-a', 'acme', { platform: 'icims', external_id: 'ic999' }),
+					rawApplication('app-b', 'other', { platform: 'icims', external_id: 'ic999' }),
+				],
+			}),
+		);
+
+		expect(plan.report.repeatApplications).toHaveLength(0);
+		expect(plan.report.validationErrors.length).toBeGreaterThan(0);
+		expect(plan.report.invariant.ok).toBe(false);
+		expect(plan.report.invariant.mismatches.some((m) => m.includes('не инъективно'))).toBe(true);
+	});
+});
+
 describe('нормализация значений', () => {
 	it('submission_channel: linkedin_easy_apply → direct + applied_via: linkedin', () => {
 		const plan = planMigration(
@@ -407,6 +493,41 @@ describe('нормализация значений', () => {
 		);
 		expect(plan.applications[0]!.submission_channel).toBe('direct');
 		expect(plan.applications[0]!.applied_via).toBe('email');
+	});
+
+	it('applied_via НЕ выводится из площадки НАХОДКИ для aggregator/network (hh, linkedin) без явного сигнала подачи', () => {
+		// Находка ревью: 167 откликов нашли вакансию в LinkedIn и подали НЕ через её форму
+		// (submission_channel остался direct, без easy_apply) — вывод «подали там же, где
+		// нашли» стирал единственный различимый факт (21 отклик, наоборот, ДЕЙСТВИТЕЛЬНО
+		// подал через LinkedIn — тот случай покрыт тестом submission_channel выше). hh —
+		// тот же класс aggregator/network.
+		const plan = planMigration(
+			input({
+				companies: [rawCompany('acme', 'acme.example.com')],
+				applications: [
+					rawApplication('a1', 'acme', { vacancy_ref: 'https://hh.ru/vacancy/136857307' }),
+					rawApplication('a2', 'acme', {
+						vacancy_ref: 'https://www.linkedin.com/jobs/view/4021234567/',
+					}),
+				],
+			}),
+		);
+		const byId = new Map(plan.applications.map((a) => [a.id, a]));
+		expect(byId.get('hh136857307')!.platform).toBe('hh');
+		expect(byId.get('hh136857307')!.applied_via).toBeUndefined();
+		expect(byId.get('li4021234567')!.platform).toBe('linkedin');
+		expect(byId.get('li4021234567')!.applied_via).toBeUndefined();
+	});
+
+	it('applied_via выводится из ссылки ТОЛЬКО для ATS — там страница вакансии физически совпадает с формой подачи', () => {
+		const plan = planMigration(
+			input({
+				companies: [rawCompany('acme', 'acme.example.com')],
+				applications: [rawApplication('a1', 'acme', { vacancy_ref: 'ashby:xyz' })],
+			}),
+		);
+		expect(plan.applications[0]!.platform).toBe('ashby');
+		expect(plan.applications[0]!.applied_via).toBe('ashby');
 	});
 
 	it('событие source: manual и пустой → owner', () => {
@@ -660,6 +781,61 @@ describe('инвариант счётчиков и стадий', () => {
 	});
 });
 
+describe('идемпотентность (находка ревью)', () => {
+	it('миграция, применённая к своему же результату, — no-op и проходит инвариант', () => {
+		// Доказательство ревьюера: `allowedGrowth = repeatApplications.length` — глобальный
+		// скаляр, не привязанный к тому, ГДЕ распределение выросло. Повторный dry-run на
+		// уже мигрированных данных (буквальный no-op — 0 алиасов, 0 нормализаций) падал с
+		// «выросло на 0, а повторов N»: цепочка ПРИСВОЕНИЯ (external_id+company_id)
+		// по-прежнему видит пару occurrences (vacancy_ref миграцией не трогается) и
+		// производит непустой repeatApplications, хотя ни один id уже не меняется.
+		const raw: MigrationInputRecords = {
+			companies: [rawCompany('acme', 'acme.example.com')],
+			applications: [
+				rawApplication('role-x', 'acme', {
+					vacancy_ref: 'https://hh.ru/vacancy/136857307',
+					applied_at: '2026-08-09T00:00:00Z',
+					ts: '2026-08-09T00:00:00Z',
+				}),
+				rawApplication('role-x', 'acme', {
+					vacancy_ref: 'https://hh.ru/vacancy/136857307',
+					applied_at: '2026-09-02T00:00:00Z',
+					ts: '2026-09-02T00:00:00Z',
+				}),
+			],
+			events: [
+				rawEvent('e1', 'role-x', { ts: '2026-08-09T00:00:00Z', stage: 'applied' }),
+				rawEvent('e2', 'role-x', { ts: '2026-09-02T00:00:00Z', stage: 'applied' }),
+			],
+		};
+
+		const first = planMigration(raw);
+		expect(first.report.invariant.ok).toBe(true);
+		expect(first.report.repeatApplications).toHaveLength(1);
+
+		// Скармливаем результат первого прогона как вход второго — те же id уже стоят в
+		// записях (хвост -rN уже в самом id, external_id уже проставлен явно).
+		const second = planMigration({
+			companies: first.companies as unknown as RawRecord[],
+			applications: first.applications as unknown as RawRecord[],
+			events: first.events as unknown as RawRecord[],
+		});
+
+		expect(second.report.companyAliases).toEqual([]);
+		expect(second.report.applicationAliases).toEqual([]); // ни один id не изменился
+		expect(second.report.normalizations).toEqual([]);
+		expect(second.companies).toHaveLength(first.companies.length);
+		expect(second.applications).toHaveLength(first.applications.length);
+		expect(second.events).toHaveLength(first.events.length);
+		// Ключевая проверка: рост посчитан по СТАРОМУ id, а не по цепочке присвоения —
+		// repeatApplications на этом прогоне вполне может остаться непустым (цепочка
+		// присвоения по external_id+company_id всё ещё видит пару occurrences), но
+		// инвариант обязан быть OK, потому что «до»-слотов здесь уже два, а не один.
+		expect(second.report.invariant.ok).toBe(true);
+		expect(second.report.invariant.mismatches).toEqual([]);
+	});
+});
+
 // ---------------------------------------------------------------------------
 // 6. applyMigration — атомарная запись, dry-run, отказ при провале инварианта
 // ---------------------------------------------------------------------------
@@ -739,5 +915,71 @@ describe('applyMigration', () => {
 		).toThrow(MigrationInvariantError);
 
 		expect(existsSync(jobsearchDir)).toBe(false);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// 7. Отчёт: опасные решения видны поимённо, а не только итогом (находка ревью)
+// ---------------------------------------------------------------------------
+
+describe('report.lines перечисляет повторы, неразобранные ссылки и обе гистограммы построчно', () => {
+	it('владелец видит КАЖДЫЙ повтор, каждую неразобранную ссылку и полное распределение до/после, а не только «инвариант OK»', () => {
+		const plan = planMigration(
+			input({
+				companies: [rawCompany('acme', 'acme.example.com')],
+				applications: [
+					rawApplication('old-early', 'acme', {
+						vacancy_ref: 'https://hh.ru/vacancy/136857307',
+						applied_at: '2026-06-01T00:00:00Z',
+						ts: '2026-06-01T00:00:00Z',
+					}),
+					rawApplication('old-late', 'acme', {
+						vacancy_ref: 'https://hh.ru/vacancy/136857307',
+						applied_at: '2026-08-01T00:00:00Z',
+						ts: '2026-08-01T00:00:00Z',
+					}),
+					rawApplication('unparsed-1', 'acme', { vacancy_ref: 'not a url, not a tag either' }),
+				],
+				events: [rawEvent('e1', 'old-early', { stage: 'applied' })],
+			}),
+		);
+
+		// Тестовые данные обязаны реально произвести и повтор, и неразобранную ссылку —
+		// иначе проверка ниже прошла бы и на пустом отчёте, ничего не доказав.
+		expect(plan.report.repeatApplications.length).toBeGreaterThan(0);
+		expect(plan.report.unparsedVacancyRefs.length).toBeGreaterThan(0);
+
+		const text = plan.report.lines.join('\n');
+		for (const repeat of plan.report.repeatApplications) {
+			expect(text).toContain(repeat.assignedId);
+			expect(text).toContain(repeat.originalId);
+		}
+		for (const unparsed of plan.report.unparsedVacancyRefs) {
+			expect(text).toContain(unparsed.applicationId);
+			expect(text).toContain(unparsed.vacancyRef);
+		}
+		expect(text).toContain('Распределение по стадиям (до):');
+		expect(text).toContain('Распределение по стадиям (после):');
+		for (const [stage, count] of Object.entries(plan.report.invariant.before.stageCounts)) {
+			expect(text).toContain(`${stage}: ${count}`);
+		}
+		for (const [stage, count] of Object.entries(plan.report.invariant.after.stageCounts)) {
+			expect(text).toContain(`${stage}: ${count}`);
+		}
+	});
+
+	it('пустые списки повторов/неразобранных ссылок не оставляют заголовок без содержимого', () => {
+		const plan = planMigration(
+			input({
+				companies: [rawCompany('acme', 'acme.example.com')],
+				applications: [rawApplication('a1', 'acme')],
+			}),
+		);
+		expect(plan.report.repeatApplications).toEqual([]);
+		expect(plan.report.unparsedVacancyRefs).toEqual([]);
+
+		const text = plan.report.lines.join('\n');
+		expect(text).toContain('Повторные отклики (-rN):\n  (нет)');
+		expect(text).toContain('Неразобранные ссылки vacancy_ref:\n  (нет)');
 	});
 });

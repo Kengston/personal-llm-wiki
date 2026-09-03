@@ -170,4 +170,47 @@ describe('renderFunnelPage', () => {
 		expect(page).toContain('last_updated: 2020-01-15');
 		expect(page).toContain('Скомпилировано 2020-01-15T09:30:00.000Z');
 	});
+
+	it('раздел «По площадке» печатает реальный разрез из report.breakdowns.platform, а не констатацию пробела', () => {
+		const apps = [application('a1', { platform: 'hh' }), application('a2', { platform: 'linkedin' })];
+		const report = computeFunnel(apps, [], { asOf: ASOF, ghostAfterDays: 21, connectedSources: ['manual', 'hh'] });
+
+		const page = renderFunnelPage(report, OPTS);
+
+		expect(page).toContain('| hh |');
+		expect(page).toContain('| linkedin |');
+		expect(page).not.toContain('движок не считает');
+	});
+
+	it('колонка разреза переименована и обе величины — «Любая реакция» и стадия «Ответили» — печатаются под разными именами (MAJOR-находка)', () => {
+		// a1 получила стадию replied (внешнее событие ЛЮБОГО рода тоже), a2 — сразу автоотказ:
+		// автоотказ НЕ входит в стадию/конверсию «replied», но входит в «Любая реакция» разреза.
+		// Если бы колонка называлась «Ответили», её цифра 2/2 читалась бы как то же самое, что
+		// применённая→replied 1/2 в «Конверсии» — а это разные числа.
+		const apps = [application('a1', { platform: 'hh' }), application('a2', { platform: 'hh' })];
+		const events = [
+			stageEvent('a1', 'replied', '2026-06-05T00:00:00Z'),
+			stageEvent('a2', 'rejected', '2026-06-06T00:00:00Z', { reason_code: 'stack_mismatch' }),
+		];
+		const report = computeFunnel(apps, events, {
+			asOf: ASOF,
+			ghostAfterDays: 21,
+			connectedSources: ['manual', 'hh'],
+		});
+
+		const page = renderFunnelPage(report, OPTS);
+
+		// Заголовок таблицы разреза не переиспользует слово «Ответили» (оно легитимно
+		// остаётся в «По стадиям» — там это имя самой стадии, а не колонки разреза).
+		const segmentHeader = page.split('\n').find((line) => line.startsWith('| Значение |'));
+		expect(segmentHeader).toBeDefined();
+		expect(segmentHeader).not.toContain('Ответили');
+		expect(segmentHeader).toContain('Любая реакция');
+
+		// Обе величины на странице, под разными именами, с разными числами.
+		expect(report.breakdowns.platform.hh).toMatchObject({ replied: { numerator: 2, denominator: 2 } });
+		expect(report.conversions['applied→replied']).toMatchObject({ numerator: 1, denominator: 2 });
+		expect(page).toContain(formatRate(report.breakdowns.platform.hh!.replied, { withInterval: true }));
+		expect(page).toContain(formatRate(report.conversions['applied→replied']!, { withInterval: true }));
+	});
 });

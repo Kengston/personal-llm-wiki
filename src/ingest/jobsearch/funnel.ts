@@ -154,6 +154,8 @@ export interface FunnelReport {
 		company_source: Record<string, SegmentStat>;
 		submission_channel: Record<string, SegmentStat>;
 		variant_id: Record<string, SegmentStat>;
+		/** Разрез по площадке ([ADR-0033], [PRD] US 29/30) — тем же механизмом, что остальные. */
+		platform: Record<string, SegmentStat>;
 	};
 	/** Группировка исходов по нормализованному справочнику причин. */
 	reasons: Record<string, number>;
@@ -170,6 +172,22 @@ export interface FunnelOptions {
 	ghostAfterDays: number;
 	/** Перечень подключённых источников для оговорки о покрытии. */
 	connectedSources: string[];
+	/**
+	 * Точка отсечения по площадке (`platform` → ISO-дата/момент, [ADR-0033] `since`,
+	 * [PRD] US 27). Отклик, поданный раньше отсечения своей площадки, в разрез ЭТОЙ
+	 * площадки не входит вовсе — ни в знаменатель, ни в числитель: у hh это 78 откликов,
+	 * заведённых до появления площадки в реестре, и без отсечения они портят её конверсию.
+	 *
+	 * НЕ хардкодится: карту собирает вызывающий из реестра площадок (страница вики), этот
+	 * модуль про реестр не знает и знать не должен — так же, как не знает конкретных
+	 * значений `connectedSources` заранее. Опциональна: старые вызовы без карты продолжают
+	 * работать, просто без отсечения.
+	 *
+	 * Общей воронки (`byStage`/`reachedStage`/`conversions` выше) карта не касается: там
+	 * ЛЮБОЙ отклик учитывается по всей своей истории независимо от площадки — это отдельное
+	 * требование PRD («в общую входит»), а не то же самое поле с тем же эффектом.
+	 */
+	platformCutoffs?: Record<string, string>;
 }
 
 /**
@@ -259,12 +277,23 @@ export function computeFunnel(
 		conversions[conversionKey(from, to)] = rate(numerator, denominator);
 	}
 
-	/** segment — разрез по произвольному ключу записи отклика. */
-	const segment = (keyOf: (a: ApplicationRecord) => string | undefined) => {
+	/**
+	 * segment — разрез по произвольному ключу записи отклика.
+	 *
+	 * @param cutoffOf — опциональная точка отсечения для конкретного значения ключа
+	 * (`platformCutoffs`, [ADR-0033] `since`): отклик раньше неё в этот разрез не входит
+	 * вовсе, до подсчёта `total`. Без параметра ведёт себя как раньше — без отсечения.
+	 */
+	const segment = (
+		keyOf: (a: ApplicationRecord) => string | undefined,
+		cutoffOf?: (key: string) => string | undefined,
+	) => {
 		const buckets = new Map<string, { total: number; replied: number; offer: number }>();
 		for (const app of applications) {
 			const key = keyOf(app);
 			if (!key) continue;
+			const cutoff = cutoffOf?.(key);
+			if (cutoff && app.applied_at < cutoff) continue;
 			const bucket = buckets.get(key) ?? { total: 0, replied: 0, offer: 0 };
 			bucket.total++;
 			const state = states.get(app.id);
@@ -279,6 +308,7 @@ export function computeFunnel(
 		return out;
 	};
 
+	const platformCutoffs = opts.platformCutoffs ?? {};
 	const sources = opts.connectedSources;
 	const sourceList = sources.length > 0 ? sources.join(', ') : 'нет подключённых';
 
@@ -295,6 +325,7 @@ export function computeFunnel(
 			company_source: segment((a) => a.company_source),
 			submission_channel: segment((a) => a.submission_channel),
 			variant_id: segment((a) => a.variant_id),
+			platform: segment((a) => a.platform, (key) => platformCutoffs[key]),
 		},
 		reasons,
 		trendAllowed: applications.length >= TREND_N,

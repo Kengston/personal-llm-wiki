@@ -21,4 +21,4 @@ date: 2026-06-07
 
 ## Связанные
 
-- [ADR-0002](0002-no-embedder-pure-karpathy.md) · [ADR-0003](0003-two-repos-public-private.md) · [ADR-0010](0010-wiki-content-model.md) · [compiler/relevance-policy.md](../../compiler/relevance-policy.md) · [compiler/rules.md](../../compiler/rules.md) · [ingest/classifier.py](../../ingest/classifier.py)
+- [ADR-0002](0002-no-embedder-pure-karpathy.md) · [ADR-0003](0003-two-repos-public-private.md) · [ADR-0010](0010-wiki-content-model.md) · [compiler/relevance-policy.md](../../compiler/relevance-policy.md) · [compiler/rules.md](../../compiler/rules.md) · [src/ingest/classifier.ts](../../src/ingest/classifier.ts)
