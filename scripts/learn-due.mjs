@@ -22,22 +22,20 @@ const ledger = createLearningLedger({ env: process.env });
 const entries = ledger.readAll('reviews');
 const result = due(entries);
 
+// Ни одна ветка ниже не зовёт process.exit(): вывод в канал асинхронен, и немедленный
+// выход обрубает его на границе буфера — --json приходил бы оборванным на середине.
 if (asJson) {
 	console.log(JSON.stringify(result, null, 2));
-	process.exit(0);
-}
-
-if (result.length === 0) {
+} else if (result.length === 0) {
 	console.log('Повторять нечего: журнал пуст или всё повторено вовремя.');
-	process.exit(0);
-}
-
-console.log(`Пора повторять (${result.length}):`);
-for (const entry of result) {
-	const mark = entry.overdue ? '!' : '~';
-	const label = entry.overdue ? 'просрочено' : 'добавка';
-	const days = entry.daysSinceReview.toFixed(1);
-	console.log(
-		`  ${mark} ${entry.concept} — box ${entry.box}, не повторялась ${days} дн. (${label})`,
-	);
+} else {
+	console.log(`Пора повторять (${result.length}):`);
+	for (const entry of result) {
+		const mark = entry.overdue ? '!' : '~';
+		const label = entry.overdue ? 'просрочено' : 'добавка';
+		const days = entry.daysSinceReview.toFixed(1);
+		console.log(
+			`  ${mark} ${entry.concept} — box ${entry.box}, не повторялась ${days} дн. (${label})`,
+		);
+	}
 }

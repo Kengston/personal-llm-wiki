@@ -52,19 +52,21 @@ if (reportPath) {
 
 const planOk = plan.report.invariant.ok && plan.report.validationErrors.length === 0;
 
+// Код возврата ставится через exitCode, а не process.exit(): отчёт миграции — самый
+// длинный вывод в репозитории, а вывод в канал (`| tee`, `> report.txt`) асинхронен;
+// немедленный выход обрубал бы отчёт ровно там, где его читают глазами.
 if (!apply) {
 	console.log('\n[dry-run] запись не выполнена. Для записи: pnpm jobsearch:migrate -- --apply');
-	process.exit(planOk ? 0 : 1);
+	process.exitCode = planOk ? 0 : 1;
+} else {
+	try {
+		applyMigration(plan, { env: process.env });
+		console.log('\nЗаписано. Readback:');
+		console.log(`  companies: ${plan.companies.length}`);
+		console.log(`  applications: ${plan.applications.length}`);
+		console.log(`  application_events: ${plan.events.length}`);
+	} catch (e) {
+		console.error(`\nЗапись отменена: ${e instanceof Error ? e.message : String(e)}`);
+		process.exitCode = 1;
+	}
 }
-
-try {
-	applyMigration(plan, { env: process.env });
-} catch (e) {
-	console.error(`\nЗапись отменена: ${e instanceof Error ? e.message : String(e)}`);
-	process.exit(1);
-}
-
-console.log('\nЗаписано. Readback:');
-console.log(`  companies: ${plan.companies.length}`);
-console.log(`  applications: ${plan.applications.length}`);
-console.log(`  application_events: ${plan.events.length}`);

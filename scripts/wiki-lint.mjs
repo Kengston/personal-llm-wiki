@@ -53,4 +53,7 @@ if (args.json) {
 	}
 }
 
-process.exit(findings.length > 0 ? 1 : 0);
+// exitCode, а не process.exit(): при выводе в канал (`| jq`, `> file`) запись в stdout
+// асинхронна, и немедленный exit обрубает её на границе буфера — отчёт --json приходил
+// оборванным на середине строки. Код возврата тот же, но процесс завершается сам, дописав.
+process.exitCode = findings.length > 0 ? 1 : 0;

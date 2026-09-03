@@ -24,11 +24,14 @@ console.log(`Каталог: ${resolveJobsearchDir(process.env)}`);
 
 if (skips.length === 0) {
 	console.log('Леджеры чисты: пропусков нет.');
-	process.exit(0);
+} else {
+	console.log(`Пропусков: ${skips.length}`);
+	for (const skip of skips) {
+		console.log(`  ${skip.file}:${skip.line} (${skip.reason}) — ${skip.message}`);
+	}
 }
 
-console.log(`Пропусков: ${skips.length}`);
-for (const skip of skips) {
-	console.log(`  ${skip.file}:${skip.line} (${skip.reason}) — ${skip.message}`);
-}
-process.exit(1);
+// exitCode, а не process.exit(): вывод в канал асинхронен, и немедленный exit обрубает
+// его на границе буфера — список пропусков приходил бы оборванным ровно тогда, когда он
+// длинный и потому нужен.
+process.exitCode = skips.length > 0 ? 1 : 0;
