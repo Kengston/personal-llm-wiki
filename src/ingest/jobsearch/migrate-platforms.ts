@@ -674,8 +674,13 @@ export function planMigration(input: MigrationInputRecords): MigrationPlan {
 			appliedViaFromChannel = 'linkedin';
 			rule = 'submission_channel_easy_apply';
 		} else if (channel === 'company_site') {
+			// Способ подачи нормализуется, а площадка — НЕТ. `company_site` говорит «подал
+			// не через агрегатор», и это не то же самое, что «подал на сайте компании»:
+			// у четырёх исторических записей с этим значением заметки событий называют
+			// Lever и Ashby, то есть подача шла через ATS. Ставить здесь `site` значит
+			// домысливать площадку из отрицания — та же ошибка, что уже исправлена для
+			// агрегаторов выше. Без сигнала поле остаётся пустым.
 			patch.submission_channel = 'direct';
-			appliedViaFromChannel = 'site';
 			rule = 'submission_channel_company_site';
 		} else if (channel === 'email') {
 			patch.submission_channel = 'direct';

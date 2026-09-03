@@ -474,7 +474,10 @@ describe('нормализация значений', () => {
 		);
 	});
 
-	it('submission_channel: company_site → direct + applied_via: site', () => {
+	it('submission_channel: company_site → direct, но площадка подачи НЕ домысливается', () => {
+		// `company_site` — это «не через агрегатор», а не «на сайте компании»: у реальных
+		// записей с этим значением заметки событий называют Lever и Ashby. Площадка
+		// выводится из ссылки, а из отрицания — нет.
 		const plan = planMigration(
 			input({
 				companies: [rawCompany('acme', 'acme.example.com')],
@@ -482,7 +485,23 @@ describe('нормализация значений', () => {
 			}),
 		);
 		expect(plan.applications[0]!.submission_channel).toBe('direct');
-		expect(plan.applications[0]!.applied_via).toBe('site');
+		expect(plan.applications[0]!.applied_via).toBeUndefined();
+	});
+
+	it('company_site со ссылкой на ATS: площадка подачи берётся из ссылки, а не из канала', () => {
+		const plan = planMigration(
+			input({
+				companies: [rawCompany('acme', 'acme.example.com')],
+				applications: [
+					rawApplication('a1', 'acme', {
+						submission_channel: 'company_site',
+						vacancy_ref: 'https://jobs.lever.co/acme/0f1e2d3c',
+					}),
+				],
+			}),
+		);
+		expect(plan.applications[0]!.submission_channel).toBe('direct');
+		expect(plan.applications[0]!.applied_via).toBe('lever');
 	});
 
 	it('submission_channel: email → direct + applied_via: email', () => {
