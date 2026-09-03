@@ -301,7 +301,7 @@ describe('dedupeApplications', () => {
 	});
 
 	it('слияние: поле, отсутствующее в строке с более поздним ts, добирается из более ранней строки той же группы', () => {
-		// Боевой паттерн (li4440166263 и ещё 24 группы в леджере): перезапись, более поздняя
+		// Боевой паттерн (25 групп в леджере): перезапись, более поздняя
 		// по ts, писалась урезанным набором полей — без applied_via, хотя он был в исходной
 		// подаче. Наивный latest-wins стёр бы факт «где подал».
 		const early = application('a1', { ts: '2026-06-01T00:00:00Z', applied_via: 'linkedin' });
@@ -332,7 +332,7 @@ describe('dedupeApplications', () => {
 		expect(dedupeApplications([early, late])).toEqual(dedupeApplications([late, early]));
 	});
 
-	it('группа из трёх строк с совпадающим ts у части из них сводится корректно (боевой паттерн li4455270175)', () => {
+	it('группа из трёх строк с совпадающим ts у части из них сводится корректно (боевой паттерн леджера)', () => {
 		const rows = [
 			application('a1', { ts: '2026-06-01T00:00:00Z', applied_via: 'linkedin' }),
 			application('a1', { ts: '2026-06-01T00:00:00Z' }), // тот же ts, без applied_via
@@ -402,6 +402,21 @@ describe('computeFunnel', () => {
 		expect(report.conversions['applied→replied']).toMatchObject({ numerator: 0, denominator: 1 });
 	});
 
+	it('стадия, достигнутая РАНЬШЕ предыдущей по времени, конверсию не засчитывает', () => {
+		// Все остальные сценарии естественно хронологичны, поэтому проверку порядка
+		// (`toAt >= fromAt`) можно было убрать, и ни один тест бы не заметил. Здесь
+		// screening датирован раньше replied — пара replied→screening не должна сработать.
+		const apps = [application('a1')];
+		const events = [
+			stageEvent('a1', 'screening', '2026-06-02T00:00:00Z'),
+			stageEvent('a1', 'replied', '2026-06-10T00:00:00Z'),
+		];
+
+		const report = computeFunnel(apps, events, opts);
+
+		expect(report.conversions['replied→screening']).toMatchObject({ numerator: 0 });
+	});
+
 	it('свежие отклики исключены из знаменателя игнора', () => {
 		// Иначе право-цензурирование занижает показатель ровно на объём последней недели.
 		const apps = [
@@ -432,6 +447,40 @@ describe('computeFunnel', () => {
 			numerator: 1,
 			denominator: 1,
 		});
+	});
+
+	it('подача старая, но ответ пришёл недавно — молчания нет: отсчёт от последнего ВНЕШНЕГО события', () => {
+		// Единственный сценарий, который различает «считать от последнего внешнего события»
+		// и «считать от подачи». В соседних тестах оба расстояния заведомо больше порога,
+		// поэтому мутация `lastExternalAt ?? applied_at` → `applied_at` их переживает.
+		// Здесь подача на 62 дня раньше `asOf` при пороге 21 день, а ответ — за 3 дня до него.
+		const apps = [application('a1', { applied_at: '2026-06-01T00:00:00Z' })];
+		const events = [stageEvent('a1', 'replied', '2026-07-30T00:00:00Z')];
+
+		expect(computeFunnel(apps, events, opts).ghost).toMatchObject({
+			numerator: 0,
+			denominator: 1,
+		});
+	});
+
+	it('подтверждённое владельцем молчание не считается внешним ответом', () => {
+		// `ghosted` — вывод владельца, а не наблюдение (шапка events.ts, пункт третий).
+		// Пока стадия не входила в OWNER_INITIATED, она двигала lastExternalAt, и отклик,
+		// про который владелец сказал «мне не ответили», попадал в числитель «есть реакция».
+		const apps = [application('a1', { applied_at: '2026-06-01T00:00:00Z' })];
+		const events = [
+			stageEvent('a1', 'ghosted', '2026-07-30T00:00:00Z', { reason_code: 'no_response' }),
+		];
+		const report = computeFunnel(apps, events, opts);
+
+		// Разрез «есть реакция» — это и есть то, что чинит попадание `ghosted` в
+		// OWNER_INITIATED: без него подтверждение молчания двигало lastExternalAt и
+		// отклик уходил в числитель ответивших.
+		expect(report.breakdowns.company_source?.manual?.replied?.numerator).toBe(0);
+		// А из самой метрики молчания отклик исключён потому, что стадия терминальная:
+		// исход зафиксирован, и предикат «столько-то дней без ответа» к нему больше
+		// не применяется. Это отдельное свойство, и оно не должно молча измениться.
+		expect(report.ghost.denominator).toBe(0);
 	});
 
 	it('TTFR считается до первого любого ответа работодателя', () => {
@@ -536,6 +585,17 @@ describe('разрез по platform и точка отсечения по пл�
 
 		// Общая конверсия видит ОБА отклика — cutoff площадки её не касается.
 		expect(report.conversions['applied→replied']).toMatchObject({ numerator: 1, denominator: 2 });
+	});
+
+	it('отклик ровно в день отсечения В разрезе остаётся — граница включающая', () => {
+		// Соседние тесты берут даты далеко по обе стороны, поэтому семантика самого дня
+		// cutoff была не зафиксирована ничем. Фиксируем явно: `since` — это «считаем С
+		// этой даты», значит день отсечения принадлежит окну.
+		const apps = [application('edge-hh', { platform: 'hh', applied_at: '2026-09-01T00:00:00Z' })];
+
+		const report = computeFunnel(apps, [], { ...opts, platformCutoffs: { hh: '2026-09-01' } });
+
+		expect(report.breakdowns.platform.hh?.replied?.denominator).toBe(1);
 	});
 
 	it('без карты отсечения разрез по площадке ведёт себя как раньше — без фильтра', () => {
