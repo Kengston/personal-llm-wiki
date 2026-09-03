@@ -31,7 +31,7 @@
 
 import { existsSync, readdirSync, readFileSync, type Dirent } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join, relative, resolve } from 'node:path';
+import { basename, dirname, join, relative, resolve } from 'node:path';
 
 import type { LedgerSkip } from './ledger.js';
 import { PLATFORM_IDS } from './jobsearch/companies.js';
@@ -397,17 +397,77 @@ function checkSourcesLinkConcepts(root: string): LintFinding[] {
 
 const SHELF_PREFIXES = new Set(['wiki', 'raw', 'work', 'learning', 'docs', 'knowledge', 'reminders']);
 
+/**
+ * Каталоги, в которые обход не заходит. `plugins` и `projects` — чужие скиллы и рабочее
+ * состояние сессий: их пути к полкам этого хранилища ничего не значат, и находки оттуда
+ * были бы шумом, который научит игнорировать весь отчёт.
+ */
+const SKILL_SCAN_SKIP = new Set([
+	'plugins',
+	'projects',
+	'node_modules',
+	'.git',
+	'todos',
+	'statsig',
+	'shell-snapshots',
+]);
+
+/**
+ * collectSkillDocs — все документы скиллов под переданным каталогом.
+ *
+ * Обход рекурсивный, и это не удобство, а условие работоспособности правила: гейт
+ * запускается на `~/.claude`, где скиллы лежат по своим подкаталогам, а плоская проверка
+ * «SKILL.md прямо здесь» на таком пути не находит НИЧЕГО и возвращает зелёный отчёт при
+ * любом содержимом скиллов. Проверено на бэкапе доregroom-версий: плоский вариант молчал
+ * там, где мёртвых путей и прямой дозаписи JSONL было в избытке.
+ *
+ * Симлинки не разворачиваются: `~/.claude/skills` держит ссылки на чужие репозитории, и
+ * заходить в них значит проверять чужие правила своим уставом.
+ */
+/**
+ * Скилл считается говорящим про ЭТО хранилище, только если он его называет.
+ *
+ * Без этого фильтра правило шумит на весь каталог скиллов: `docs/adr/`, `docs/phases/`,
+ * `raw/` встречаются у скиллов совсем других проектов и означают там их собственные
+ * репозитории. Находки «путь не существует» по чужим полкам не просто бесполезны — они
+ * приучают пролистывать отчёт целиком, и тогда правило перестаёт работать и для своих.
+ */
+const OWN_STORAGE_MARKER = /llm-wiki-content|Второ\w+ мозг/i;
+
 function collectSkillDocs(skillsDir: string): string[] {
 	const docs: string[] = [];
-	const skillMd = join(skillsDir, 'SKILL.md');
-	if (existsSync(skillMd)) docs.push(skillMd);
-	const refsDir = join(skillsDir, 'references');
-	if (existsSync(refsDir)) {
-		for (const name of readdirSync(refsDir)) {
-			if (name.endsWith('.md')) docs.push(join(refsDir, name));
+	const walk = (dir: string, depth: number): void => {
+		if (depth > 6) return;
+		let entries;
+		try {
+			entries = readdirSync(dir, { withFileTypes: true });
+		} catch {
+			return;
 		}
+		for (const e of entries) {
+			if (e.isSymbolicLink()) continue;
+			if (e.isDirectory()) {
+				if (SKILL_SCAN_SKIP.has(e.name)) continue;
+				walk(join(dir, e.name), depth + 1);
+			} else if (e.name === 'SKILL.md' || (e.name.endsWith('.md') && basename(dir) === 'references')) {
+				docs.push(join(dir, e.name));
+			}
+		}
+	};
+	walk(skillsDir, 0);
+
+	// Отбор идёт по СКИЛЛУ целиком, а не по отдельному файлу: хранилище обычно названо в
+	// SKILL.md, а пути к полкам расписаны в его references/ — проверять их порознь значило
+	// бы терять ровно те файлы, ради которых правило и заведено.
+	const skillRootOf = (doc: string): string =>
+		basename(dirname(doc)) === 'references' ? dirname(dirname(doc)) : dirname(doc);
+	const ownSkillRoots = new Set<string>();
+	for (const doc of docs) {
+		const skillRoot = skillRootOf(doc);
+		if (ownSkillRoots.has(skillRoot)) continue;
+		if (OWN_STORAGE_MARKER.test(readFileSync(doc, 'utf8'))) ownSkillRoots.add(skillRoot);
 	}
-	return docs;
+	return docs.filter((doc) => ownSkillRoots.has(skillRootOf(doc)));
 }
 
 /** checkSkillShelfPaths — backtick-путь на известную полку, которого нет на диске хранилища. */
@@ -457,19 +517,27 @@ function checkSkillDirectJsonlWrite(skillsDir: string): LintFinding[] {
 }
 
 /**
- * checkSkillPlatformMentions — узкая эвристика: строка со словом «площадк…» и
- * backtick-токеном вида id площадки, которого нет в PLATFORM_IDS. Не ловит прозу без
- * backtick-обёртки — это цена детерминизма, семантический проход шире.
+ * checkSkillPlatformMentions — id площадки, которого нет в PLATFORM_IDS.
+ *
+ * Токен считается идентификатором площадки только там, где он назван им синтаксически:
+ * после `platform:` / `applied_via:` или внутри пути страницы реестра
+ * `wiki/jobsearch/platforms/<id>.md`. Прежняя эвристика «строка со словом площадк… плюс
+ * любой backtick-токен» ловила соседние слова — на живом дереве она объявила площадкой
+ * поле `order` из фразы про порядок обхода площадок. Ложная находка в детерминированной
+ * проверке дороже пропущенной: её нельзя ни подтвердить, ни починить.
  */
+const PLATFORM_ID_MENTION_RE =
+	/(?:platform|applied_via)\s*[:=]\s*`?([a-z][a-z0-9_-]{1,30})`?|platforms\/([a-z][a-z0-9_-]{1,30})\.md/g;
+
 function checkSkillPlatformMentions(skillsDir: string): LintFinding[] {
 	const findings: LintFinding[] = [];
 	for (const doc of collectSkillDocs(skillsDir)) {
 		const lines = readFileSync(doc, 'utf8').split('\n');
 		for (let i = 0; i < lines.length; i++) {
 			const line = lines[i]!;
-			if (!/площадк/i.test(line)) continue;
-			for (const m of line.matchAll(/`([a-z][a-z0-9_-]{1,30})`/g)) {
-				const id = m[1]!;
+			for (const m of line.matchAll(PLATFORM_ID_MENTION_RE)) {
+				const id = m[1] ?? m[2] ?? '';
+				if (!id || id === 'id') continue; // `platforms/<id>.md` — шаблон, а не площадка
 				if (!(PLATFORM_IDS as readonly string[]).includes(id)) {
 					findings.push({
 						rule: 'skill-unknown-platform-id',

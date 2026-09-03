@@ -368,7 +368,7 @@ describe('--skills skill-missing-shelf-path', () => {
 	it('срабатывает: путь к полке упомянут, но не существует на диске', () => {
 		const skillsDir = join(tmpDir, 'skills', 'jobsearch-run');
 		mkdirSync(skillsDir, { recursive: true });
-		writeFileSync(join(skillsDir, 'SKILL.md'), 'Параметры прогона лежат в `wiki/jobsearch/run-params.md`.\n');
+		writeFileSync(join(skillsDir, 'SKILL.md'), 'Скилл хранилища ~/llm-wiki-content.\nПараметры прогона лежат в `wiki/jobsearch/run-params.md`.\n');
 
 		const findings = lintStorage(root, { skillsDir });
 
@@ -381,7 +381,7 @@ describe('--skills skill-missing-shelf-path', () => {
 		put('wiki/jobsearch/run-params.md', '---\ntype: run-params\n---\n# Параметры\n');
 		const skillsDir = join(tmpDir, 'skills', 'jobsearch-run');
 		mkdirSync(skillsDir, { recursive: true });
-		writeFileSync(join(skillsDir, 'SKILL.md'), 'Параметры прогона лежат в `wiki/jobsearch/run-params.md`.\n');
+		writeFileSync(join(skillsDir, 'SKILL.md'), 'Скилл хранилища ~/llm-wiki-content.\nПараметры прогона лежат в `wiki/jobsearch/run-params.md`.\n');
 
 		const findings = lintStorage(root, { skillsDir });
 
@@ -393,6 +393,57 @@ describe('--skills skill-missing-shelf-path', () => {
 
 		expect(findingsOf('skill-missing-shelf-path', findings)).toHaveLength(0);
 	});
+
+	it('находит скиллы в глубине дерева, а не только SKILL.md в самом каталоге', () => {
+		// Так гейт и запускается: --skills ~/.claude, где каждый скилл лежит в своём
+		// подкаталоге. Плоская проверка «SKILL.md прямо здесь» на таком пути молчит при
+		// любом содержимом скиллов — то есть даёт зелёный отчёт, ничего не проверив.
+		const rootDir = join(tmpDir, 'claude-home');
+		const nested = join(rootDir, 'skills', 'jobsearch-daily');
+		mkdirSync(join(nested, 'references'), { recursive: true });
+		writeFileSync(join(nested, 'SKILL.md'), 'Скилл хранилища ~/llm-wiki-content.\nЖивые заметки в `raw/jobsearch/open-tails.md`.\n');
+		writeFileSync(
+			join(nested, 'references', 'routine.md'),
+			'Адрес дневника хранилища llm-wiki-content — `raw/jobsearch/diary-url.txt`.\n',
+		);
+
+		const hits = findingsOf('skill-missing-shelf-path', lintStorage(root, { skillsDir: rootDir }));
+
+		expect(hits).toHaveLength(2);
+		expect(hits.map((h) => h.path).sort()).toEqual([
+			'skills/jobsearch-daily/SKILL.md',
+			'skills/jobsearch-daily/references/routine.md',
+		]);
+	});
+
+	it('игнорирует скилл, который это хранилище вообще не упоминает', () => {
+		// У скилла чужого проекта свои `docs/` и `raw/`, и они означают его репозиторий.
+		// Без этого отбора правило на живом каталоге выдавало два десятка находок по
+		// tutor-plus и abcage-mcp-hub — отчёт, который перестают читать целиком.
+		const rootDir = join(tmpDir, 'claude-home-3');
+		const foreign = join(rootDir, 'skills', 'tutor-plus');
+		mkdirSync(foreign, { recursive: true });
+		writeFileSync(join(foreign, 'SKILL.md'), 'Фазы проекта лежат в `docs/phases/`.\n');
+
+		expect(findingsOf('skill-missing-shelf-path', lintStorage(root, { skillsDir: rootDir }))).toEqual(
+			[],
+		);
+	});
+
+	it('не заходит в plugins и projects: чужие скиллы живут по своим правилам', () => {
+		const rootDir = join(tmpDir, 'claude-home-2');
+		for (const dir of ['plugins', 'projects']) {
+			mkdirSync(join(rootDir, dir, 'foreign'), { recursive: true });
+			writeFileSync(
+				join(rootDir, dir, 'foreign', 'SKILL.md'),
+				'Чужой скилл проекта llm-wiki-content читает `wiki/nothing-here.md`.\n',
+			);
+		}
+
+		expect(findingsOf('skill-missing-shelf-path', lintStorage(root, { skillsDir: rootDir }))).toEqual(
+			[],
+		);
+	});
 });
 
 describe('--skills skill-direct-jsonl-write', () => {
@@ -401,7 +452,7 @@ describe('--skills skill-direct-jsonl-write', () => {
 		mkdirSync(skillsDir, { recursive: true });
 		writeFileSync(
 			join(skillsDir, 'SKILL.md'),
-			'После подачи допишите строку в applications.jsonl вручную.\n',
+			'Скилл хранилища ~/llm-wiki-content.\nПосле подачи допишите строку в applications.jsonl вручную.\n',
 		);
 
 		const findings = lintStorage(root, { skillsDir });
@@ -414,7 +465,7 @@ describe('--skills skill-direct-jsonl-write', () => {
 		mkdirSync(skillsDir, { recursive: true });
 		writeFileSync(
 			join(skillsDir, 'SKILL.md'),
-			'После подачи запишите строку в applications.jsonl командой `pnpm jobsearch:append -- applications`.\n',
+			'Скилл хранилища ~/llm-wiki-content.\nПосле подачи запишите строку в applications.jsonl командой `pnpm jobsearch:append -- applications`.\n',
 		);
 
 		const findings = lintStorage(root, { skillsDir });
@@ -427,7 +478,7 @@ describe('--skills skill-unknown-platform-id', () => {
 	it('срабатывает: упомянута площадка вне PLATFORM_IDS', () => {
 		const skillsDir = join(tmpDir, 'skills', 'jobsearch-run');
 		mkdirSync(skillsDir, { recursive: true });
-		writeFileSync(join(skillsDir, 'SKILL.md'), 'Новая площадка `indeed` пока не в реестре.\n');
+		writeFileSync(join(skillsDir, 'SKILL.md'), 'Скилл хранилища ~/llm-wiki-content.\nНовая площадка: platform: indeed — пока не в реестре.\n');
 
 		const findings = lintStorage(root, { skillsDir });
 
@@ -439,7 +490,7 @@ describe('--skills skill-unknown-platform-id', () => {
 	it('не срабатывает: площадка есть в PLATFORM_IDS', () => {
 		const skillsDir = join(tmpDir, 'skills', 'jobsearch-run');
 		mkdirSync(skillsDir, { recursive: true });
-		writeFileSync(join(skillsDir, 'SKILL.md'), 'Площадка `hh` идёт первой в порядке обхода.\n');
+		writeFileSync(join(skillsDir, 'SKILL.md'), 'Скилл хранилища ~/llm-wiki-content.\nПлощадка platform: hh идёт первой в порядке обхода.\n');
 
 		const findings = lintStorage(root, { skillsDir });
 
