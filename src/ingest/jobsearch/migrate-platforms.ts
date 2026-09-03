@@ -198,11 +198,17 @@ export type NormalizationRule =
 	| 'submission_channel_email'
 	| 'event_source_normalized'
 	| 'event_kind_note_to_touchpoint'
-	| 'event_touchpoint_missing_touch_kind';
+	| 'event_touchpoint_missing_touch_kind'
+	| 'company_remote_mode_normalized'
+	| 'company_stage_normalized'
+	| 'company_type_normalized'
+	| 'company_interview_language_normalized'
+	| 'event_reason_note_null_removed'
+	| 'event_id_synthesized';
 
 export interface NormalizationNote {
 	rule: NormalizationRule;
-	recordType: 'application' | 'event';
+	recordType: 'company' | 'application' | 'event';
 	/** id записи ПОСЛЕ миграции (устойчивее для поиска в отчёте, чем старый). */
 	id: string;
 	from: unknown;
@@ -274,15 +280,176 @@ function stageHistogram(
 	return hist;
 }
 
-function diffCounts(before: Record<string, number>, after: Record<string, number>): string[] {
+/**
+ * diffCounts — расхождения распределения по стадиям, с одним разрешённым исключением.
+ *
+ * Буквальное «до == после» здесь оказалось СЛИШКОМ строгим, и это не послабление, а
+ * уточнение того, что инвариант вообще охраняет. Стадия считается фолдом по `application.id`,
+ * а до миграции два разных отклика на одну вакансию делили один id — второй в воронке просто
+ * не existовал. Суффикс `-rN` их разводит, и стадия честно прибавляет ровно столько, сколько
+ * откликов миграция сделала видимыми.
+ *
+ * Поэтому проверяется не равенство, а два условия: ни одна стадия не УБАВИЛАСЬ (потеря
+ * запрещена всегда) и суммарная прибавка равна числу разведённых повторов (появление
+ * запрещено, если его нечем объяснить). Число `allowedGrowth` приходит из плана, а не
+ * подбирается под результат.
+ */
+export function diffStageCounts(
+	before: Record<string, number>,
+	after: Record<string, number>,
+	allowedGrowth: number,
+): string[] {
 	const mismatches: string[] = [];
 	const keys = new Set([...Object.keys(before), ...Object.keys(after)]);
+	let growth = 0;
 	for (const key of keys) {
 		const b = before[key] ?? 0;
 		const a = after[key] ?? 0;
-		if (a !== b) mismatches.push(`стадия ${key}: было ${b}, стало ${a}`);
+		if (a < b) mismatches.push(`стадия ${key}: было ${b}, стало ${a} — стадия потеряна`);
+		else growth += a - b;
+	}
+	if (growth !== allowedGrowth) {
+		mismatches.push(
+			`распределение по стадиям выросло на ${growth}, а разведённых повторов ${allowedGrowth} — ` +
+				'прибавку нечем объяснить',
+		);
 	}
 	return mismatches;
+}
+
+// ---------------------------------------------------------------------------
+// Нормализация значений компаний
+// ---------------------------------------------------------------------------
+
+/**
+ * COMPANY_VALUE_SYNONYMS — оставшиеся старые значения `assessed(...).value` четырёх полей
+ * компании вне текущих словарей ([D4]/[ADR-0029]: словари закрытые, новых членов не
+ * заводим). ОДНО правило на всю таблицу, а не своё для каждой строки:
+ *
+ *   - значение, которое является СИНОНИМОМ уже существующего члена словаря, приводится к
+ *     нему (`remote_first`/`remote_global`/`remote_worldwide` — то же самое, что
+ *     `remote_100`, просто другим словом; `remote_eu`/`remote_country` — то же самое, что
+ *     `remote_country_bound`);
+ *   - значение, из которого нужный факт НЕ следует, уходит в штатный `unknown`/`other`, а
+ *     не додумывается: `private` не говорит, какой раунд у компании; `product`/`scaleup`
+ *     не говорят, какого она размера (словарь `company_type` различает продуктовые компании
+ *     именно по размеру); голое `remote` не говорит, какой из трёх режимов
+ *     (wfa/remote_100/remote_country_bound) имелся в виду; `es`/`it` — читаемые языки
+ *     интервью, для которых словарь не заводит отдельных членов, а `other` под них и
+ *     существует.
+ *
+ * Патчится ТОЛЬКО `.value` — `source`/`confirmed_at`/`confirmed_by_human` остаются как в
+ * исходной записи: это происхождение факта, а не сам факт, и переименование значения его
+ * не меняет.
+ */
+const COMPANY_VALUE_SYNONYMS: ReadonlyArray<{
+	field: 'remote_mode' | 'stage' | 'company_type' | 'interview_language';
+	rule: NormalizationRule;
+	from: string;
+	to: string;
+}> = [
+	{ field: 'remote_mode', rule: 'company_remote_mode_normalized', from: 'remote_first', to: 'remote_100' },
+	{ field: 'remote_mode', rule: 'company_remote_mode_normalized', from: 'remote_global', to: 'remote_100' },
+	{
+		field: 'remote_mode',
+		rule: 'company_remote_mode_normalized',
+		from: 'remote_eu',
+		to: 'remote_country_bound',
+	},
+	{
+		field: 'remote_mode',
+		rule: 'company_remote_mode_normalized',
+		from: 'remote_country',
+		to: 'remote_country_bound',
+	},
+	// remote_worldwide — синоним remote_100 (та же «без гео-привязки», другое слово).
+	{ field: 'remote_mode', rule: 'company_remote_mode_normalized', from: 'remote_worldwide', to: 'remote_100' },
+	// remote (без уточнения) — ни один из трёх реальных режимов (wfa/remote_100/
+	// remote_country_bound) из голого слова не следует; додумывать который — выдумывать факт.
+	{ field: 'remote_mode', rule: 'company_remote_mode_normalized', from: 'remote', to: 'unknown' },
+	{ field: 'stage', rule: 'company_stage_normalized', from: 'series_b', to: 'series_b_plus' },
+	{ field: 'stage', rule: 'company_stage_normalized', from: 'series_c', to: 'series_b_plus' },
+	{ field: 'stage', rule: 'company_stage_normalized', from: 'early', to: 'seed' },
+	{ field: 'stage', rule: 'company_stage_normalized', from: 'pre_seed_seed', to: 'seed' },
+	{ field: 'stage', rule: 'company_stage_normalized', from: 'private', to: 'unknown' },
+	{ field: 'company_type', rule: 'company_type_normalized', from: 'product_startup', to: 'startup' },
+	{
+		field: 'company_type',
+		rule: 'company_type_normalized',
+		from: 'agency_outsourcing',
+		to: 'outsourcing_outstaff',
+	},
+	{ field: 'company_type', rule: 'company_type_normalized', from: 'product', to: 'unknown' },
+	// scaleup — как и product: про размер продуктовой компании (smb/enterprise) ничего не
+	// говорит, размер додумывать значит выдумывать факт.
+	{ field: 'company_type', rule: 'company_type_normalized', from: 'scaleup', to: 'unknown' },
+	{ field: 'interview_language', rule: 'company_interview_language_normalized', from: 'es', to: 'other' },
+	{ field: 'interview_language', rule: 'company_interview_language_normalized', from: 'it', to: 'other' },
+] as const;
+
+const COMPANY_VALUE_SYNONYM_MAP = new Map(
+	COMPANY_VALUE_SYNONYMS.map((entry) => [`${entry.field}:${entry.from}`, entry]),
+);
+
+/**
+ * normalizeCompanyValues — применяет {@link COMPANY_VALUE_SYNONYMS} к одной сырой записи
+ * компании. Возвращает патч (только затронутые поля) и попутно пишет заметки в отчёт —
+ * тем же способом, что и остальные нормализации этого файла.
+ */
+function normalizeCompanyValues(
+	raw: RawRecord,
+	companyId: string,
+	normalizations: NormalizationNote[],
+): RawRecord {
+	const patch: RawRecord = {};
+	for (const field of ['remote_mode', 'stage', 'company_type', 'interview_language'] as const) {
+		const wrapper = raw[field];
+		if (!wrapper || typeof wrapper !== 'object') continue;
+		const current = (wrapper as RawRecord).value;
+		if (typeof current !== 'string') continue;
+		const entry = COMPANY_VALUE_SYNONYM_MAP.get(`${field}:${current}`);
+		if (!entry) continue;
+		patch[field] = { ...(wrapper as RawRecord), value: entry.to };
+		normalizations.push({ rule: entry.rule, recordType: 'company', id: companyId, from: current, to: entry.to });
+	}
+	return patch;
+}
+
+// ---------------------------------------------------------------------------
+// Синтез id события
+// ---------------------------------------------------------------------------
+
+const SLUG_ID_PATTERN = /^[a-z0-9][a-z0-9_.-]*$/;
+
+/** Тот же контракт, что и `slugId` в `events.ts`/`companies.ts` (схема не экспортирует regex). */
+function isValidSlugId(value: unknown): value is string {
+	return typeof value === 'string' && value.length >= 1 && value.length <= 64 && SLUG_ID_PATTERN.test(value);
+}
+
+/**
+ * synthesizeEventId — детерминированный id для события без валидного `id` (пусто, `null`
+ * или длиннее 64 символов — реальный случай в леджере: три события со старым id
+ * `<application_id>-<stage>` без обрезки, физически невалидным по схеме).
+ *
+ * Правило — то же самое, что уже видно на остальных id в файле (например
+ * `freedom24-senior-php-developer-relocation-to-cyprus-billing-appl`, обрезанный ровно на
+ * границе 64 символов): `<application_id>-<stage>` (или `<application_id>-<touch_kind>` для
+ * касания), обрезка ДО 64 символов, а при коллизии с уже занятым id — числовой суффикс
+ * `-N`, который откусывает место у базовой строки, чтобы итог остался в лимите. Это НЕ
+ * `eventId` из `src/bridge/jobsearch-intent.ts` (там — хэш содержимого для идемпотентности
+ * интентов владельца) — у исторических записей этого леджера другое соглашение об id, и
+ * синтез обязан совпасть с НИМ, а не завести третье.
+ */
+function synthesizeEventId(base: string, used: Set<string>): string {
+	const truncatedBase = base.slice(0, 64);
+	let candidate = truncatedBase;
+	let n = 0;
+	while (used.has(candidate)) {
+		const suffix = `-${n}`;
+		candidate = `${truncatedBase.slice(0, 64 - suffix.length)}${suffix}`;
+		n++;
+	}
+	return candidate;
 }
 
 // ---------------------------------------------------------------------------
@@ -350,6 +517,10 @@ export function planMigration(input: MigrationInputRecords): MigrationPlan {
 	const companyAliases: AliasEntry[] = [];
 	const migratedCompanies: CompanyRecord[] = [];
 	const validationErrors: ValidationFailure[] = [];
+	// Общий на все три леджера — объявлен здесь (а не в секции откликов, как раньше),
+	// потому что нормализация значений компаний тоже пишет в него, а компании мигрируют
+	// первыми.
+	const normalizations: NormalizationNote[] = [];
 
 	for (const raw of input.companies) {
 		const oldId = isNonEmptyString(raw.id) ? raw.id : '';
@@ -358,7 +529,8 @@ export function planMigration(input: MigrationInputRecords): MigrationPlan {
 			companyAliasSeen.add(oldId);
 			companyAliases.push({ from: oldId, to: newId });
 		}
-		const candidate = { ...raw, id: newId };
+		const valuePatch = normalizeCompanyValues(raw, newId, normalizations);
+		const candidate = { ...raw, ...valuePatch, id: newId };
 		const parsed = CompanyRecordSchema.safeParse(candidate);
 		if (parsed.success) {
 			migratedCompanies.push(parsed.data);
@@ -378,9 +550,10 @@ export function planMigration(input: MigrationInputRecords): MigrationPlan {
 		candidate: RawRecord;
 		externalId?: string;
 		appliedAt: string;
+		/** Для «latest wins» внутри перезаписи ([D: latest wins], как у dedupeCompanies). */
+		ts: string;
 	}
 
-	const normalizations: NormalizationNote[] = [];
 	const unparsedVacancyRefs: UnparsedVacancyRef[] = [];
 	const works: AppWork[] = [];
 
@@ -441,11 +614,13 @@ export function planMigration(input: MigrationInputRecords): MigrationPlan {
 
 		const candidate: RawRecord = { ...raw, ...patch };
 		const externalId = isNonEmptyString(candidate.external_id) ? candidate.external_id : undefined;
+		const appliedAt = isNonEmptyString(raw.applied_at) ? raw.applied_at : String(raw.ts ?? '');
 		works.push({
 			oldId,
 			candidate,
 			externalId,
-			appliedAt: isNonEmptyString(raw.applied_at) ? raw.applied_at : String(raw.ts ?? ''),
+			appliedAt,
+			ts: isNonEmptyString(raw.ts) ? raw.ts : appliedAt,
 		});
 	}
 
@@ -453,52 +628,110 @@ export function planMigration(input: MigrationInputRecords): MigrationPlan {
 	// разделённый префикс не добавляем — так же, как уже сделано в hh.ts). Повторный
 	// отклик на ТУ ЖЕ вакансию (тот же external_id) получает суффикс `-rN` по порядку
 	// подачи ([ADR-0033] §4). Без внешнего id — старый id остаётся как есть.
-	const applicationIdMap = new Map<string, string>();
-	const repeatApplications: RepeatApplication[] = [];
-	const byExternalId = new Map<string, AppWork[]>();
+	//
+	// ПЕРЕЗАПИСЬ vs ПОВТОРНЫЙ ОТКЛИК. Леджер append-only: несколько строк с одним старым
+	// id — необязательно два разных отклика. Строки с одним старым id И одним applied_at —
+	// перезаписи ОДНОЙ записи (правка задним числом; содержимое решает строка с самым
+	// поздним ts, [D: latest wins], как у dedupeCompanies), им положен ОДИН новый id без
+	// суффикса, и это не коллизия. Строки с одним старым id, но РАЗНЫМ applied_at — вправду
+	// повторный отклик (подал снова спустя время); старый id у него просто исторически
+	// совпал с прошлым, и такая пара «occurrence» разруливается -rN логикой ниже наравне с
+	// откликами на разные старые id. Поэтому единица группировки здесь — occurrence
+	// (oldId + applied_at), а не сырая строка и не голый oldId.
+	interface Occurrence {
+		oldId: string;
+		appliedAt: string;
+		externalId?: string;
+		works: AppWork[];
+	}
+	const occurrenceKey = (oldId: string, appliedAt: string): string => `${oldId} ${appliedAt}`;
+
+	const occurrences = new Map<string, Occurrence>();
+	const occurrencesByOldId = new Map<string, Occurrence[]>();
 	for (const work of works) {
-		if (!work.externalId) {
-			applicationIdMap.set(work.oldId, work.oldId);
+		const key = occurrenceKey(work.oldId, work.appliedAt);
+		let occurrence = occurrences.get(key);
+		if (!occurrence) {
+			occurrence = { oldId: work.oldId, appliedAt: work.appliedAt, works: [] };
+			occurrences.set(key, occurrence);
+			const list = occurrencesByOldId.get(work.oldId) ?? [];
+			list.push(occurrence);
+			occurrencesByOldId.set(work.oldId, list);
+		}
+		occurrence.works.push(work);
+	}
+	for (const occurrence of occurrences.values()) {
+		occurrence.externalId = occurrence.works.reduce((best, w) => (w.ts >= best.ts ? w : best)).externalId;
+	}
+
+	const applicationIdMap = new Map<string, string>(); // occurrenceKey → новый id
+	const repeatApplications: RepeatApplication[] = [];
+	const byExternalId = new Map<string, Occurrence[]>();
+	for (const occurrence of occurrences.values()) {
+		if (!occurrence.externalId) {
+			applicationIdMap.set(occurrenceKey(occurrence.oldId, occurrence.appliedAt), occurrence.oldId);
 			continue;
 		}
-		const group = byExternalId.get(work.externalId) ?? [];
-		group.push(work);
-		byExternalId.set(work.externalId, group);
+		const group = byExternalId.get(occurrence.externalId) ?? [];
+		group.push(occurrence);
+		byExternalId.set(occurrence.externalId, group);
 	}
 	for (const [externalId, group] of byExternalId) {
 		const ordered = [...group].sort(
 			(a, b) => a.appliedAt.localeCompare(b.appliedAt) || a.oldId.localeCompare(b.oldId),
 		);
-		ordered.forEach((work, index) => {
+		ordered.forEach((occurrence, index) => {
 			const assignedId = index === 0 ? externalId : `${externalId}-r${index + 1}`;
-			applicationIdMap.set(work.oldId, assignedId);
+			applicationIdMap.set(occurrenceKey(occurrence.oldId, occurrence.appliedAt), assignedId);
 			if (index > 0) {
 				repeatApplications.push({
 					assignedId,
 					baseId: externalId,
-					originalId: work.oldId,
-					appliedAt: work.appliedAt,
+					originalId: occurrence.oldId,
+					appliedAt: occurrence.appliedAt,
 				});
 			}
 		});
 	}
 
+	/**
+	 * resolveApplicationId — событие ссылается на СТАРЫЙ application_id, а не на occurrence.
+	 * Когда у старого id несколько occurrences (повторный отклик), берём ту, что действовала
+	 * на момент события: последнюю по applied_at, что не позже ts события; если событие
+	 * почему-то раньше самой первой подачи (рассинхрон часов в старых данных) — берём первую.
+	 */
+	function resolveApplicationId(oldAppId: string, eventTs: string): string | undefined {
+		const occs = occurrencesByOldId.get(oldAppId);
+		if (!occs || occs.length === 0) return undefined;
+		const sorted = [...occs].sort((a, b) => a.appliedAt.localeCompare(b.appliedAt));
+		let chosen = sorted[0]!;
+		for (const occ of sorted) if (occ.appliedAt <= eventTs) chosen = occ;
+		return applicationIdMap.get(occurrenceKey(chosen.oldId, chosen.appliedAt));
+	}
+
 	const applicationAliases: AliasEntry[] = [];
 	const seenFinalIds = new Set<string>();
+	const seenOccurrences = new Set<string>();
 	const migratedApplications: ApplicationRecord[] = [];
 
 	for (const work of works) {
-		const newId = applicationIdMap.get(work.oldId) ?? work.oldId;
-		if (work.oldId && newId !== work.oldId) applicationAliases.push({ from: work.oldId, to: newId });
+		const key = occurrenceKey(work.oldId, work.appliedAt);
+		const newId = applicationIdMap.get(key) ?? work.oldId;
 
-		if (seenFinalIds.has(newId)) {
-			validationErrors.push({
-				recordType: 'application',
-				id: newId,
-				message: `id пересекается с другой мигрированной записью после переноса (было: ${work.oldId})`,
-			});
+		// Алиас и коллизия — по occurrence, а не по сырой строке: несколько строк-перезаписей
+		// делят один occurrence и один newId легитимно, это не коллизия и не второй алиас.
+		if (!seenOccurrences.has(key)) {
+			seenOccurrences.add(key);
+			if (work.oldId && newId !== work.oldId) applicationAliases.push({ from: work.oldId, to: newId });
+			if (seenFinalIds.has(newId)) {
+				validationErrors.push({
+					recordType: 'application',
+					id: newId,
+					message: `id пересекается с другой мигрированной записью после переноса (было: ${work.oldId})`,
+				});
+			}
+			seenFinalIds.add(newId);
 		}
-		seenFinalIds.add(newId);
 
 		const candidate = { ...work.candidate, id: newId };
 		const parsed = ApplicationRecordSchema.safeParse(candidate);
@@ -514,14 +747,23 @@ export function planMigration(input: MigrationInputRecords): MigrationPlan {
 	const eventApplicationIdRewrites: Array<{ eventId: string; from: string; to: string }> = [];
 	const migratedEvents: ApplicationEvent[] = [];
 
+	// Занятые id — сперва ВСЕ уже валидные (не только уже обработанные в этом цикле), иначе
+	// синтезированный id мог бы столкнуться с событием, до которого цикл ещё не дошёл.
+	const usedEventIds = new Set<string>();
+	for (const raw of input.events) if (isValidSlugId(raw.id)) usedEventIds.add(raw.id);
+
 	for (const raw of input.events) {
 		const eventId = isNonEmptyString(raw.id) ? raw.id : '';
 		const patch: RawRecord = {};
 
+		// Событие ссылается на СТАРЫЙ application_id, а не на occurrence — при повторном
+		// отклике (см. resolveApplicationId выше) под одним старым id может скрываться
+		// несколько occurrences, и событие обязано попасть в ТУ, что действовала на момент
+		// его ts, а не в первую попавшуюся.
 		const oldAppId = isNonEmptyString(raw.application_id) ? raw.application_id : undefined;
-		if (oldAppId && applicationIdMap.has(oldAppId)) {
-			const newAppId = applicationIdMap.get(oldAppId)!;
-			if (newAppId !== oldAppId) {
+		if (oldAppId) {
+			const newAppId = resolveApplicationId(oldAppId, isNonEmptyString(raw.ts) ? raw.ts : '');
+			if (newAppId && newAppId !== oldAppId) {
 				patch.application_id = newAppId;
 				eventApplicationIdRewrites.push({ eventId, from: oldAppId, to: newAppId });
 			}
@@ -571,12 +813,70 @@ export function planMigration(input: MigrationInputRecords): MigrationPlan {
 			});
 		}
 
+		// reason_note: null → поле убирается. Схема допускает ЕГО ОТСУТСТВИЕ (`.optional()`),
+		// но не `null` — а старые записи писали `null` явно, вместо того чтобы не писать
+		// поле вовсе. `undefined` в патче стирает ключ при сборке `candidate` ниже.
+		if (raw.reason_note === null) {
+			patch.reason_note = undefined;
+			normalizations.push({
+				rule: 'event_reason_note_null_removed',
+				recordType: 'event',
+				id: eventId,
+				from: null,
+				to: undefined,
+			});
+		}
+
+		// id: невалидный slug (пусто/`null`/длиннее 64 символов — реальный случай в леджере:
+		// старый генератор id не обрезал `<application_id>-<stage>` до лимита схемы) →
+		// синтез тем же правилом, каким построены остальные id в файле. Обязано идти ПОСЛЕ
+		// переписывания application_id по карте алиасов (patch.application_id выше) — иначе
+		// id получился бы от уже устаревшей ссылки на отклик.
+		if (!isValidSlugId(raw.id)) {
+			const finalAppId = isNonEmptyString(patch.application_id)
+				? patch.application_id
+				: isNonEmptyString(raw.application_id)
+					? raw.application_id
+					: '';
+			const finalStage = isNonEmptyString(patch.stage)
+				? patch.stage
+				: kind === 'stage_change' && isNonEmptyString(raw.stage)
+					? raw.stage
+					: undefined;
+			const finalTouchKind = isNonEmptyString(patch.touch_kind)
+				? patch.touch_kind
+				: isNonEmptyString(raw.touch_kind)
+					? raw.touch_kind
+					: undefined;
+			const suffixPart = kind === 'stage_change' ? finalStage : finalTouchKind;
+
+			// Без application_id и стадии/вида касания синтезировать не из чего — запись
+			// остаётся с исходным (невалидным) id и попадёт в отчёт валидации ниже, как и
+			// любая другая запись, которую эта миграция не может починить сама.
+			if (isNonEmptyString(finalAppId) && isNonEmptyString(suffixPart)) {
+				const synthesized = synthesizeEventId(`${finalAppId}-${suffixPart}`, usedEventIds);
+				usedEventIds.add(synthesized);
+				patch.id = synthesized;
+				normalizations.push({
+					rule: 'event_id_synthesized',
+					recordType: 'event',
+					id: synthesized,
+					from: raw.id,
+					to: synthesized,
+				});
+			}
+		}
+
 		const candidate = { ...raw, ...patch };
 		const parsed = ApplicationEventSchema.safeParse(candidate);
 		if (parsed.success) {
 			migratedEvents.push(parsed.data);
 		} else {
-			validationErrors.push({ recordType: 'event', id: eventId, message: parsed.error.message });
+			validationErrors.push({
+				recordType: 'event',
+				id: isNonEmptyString(patch.id) ? patch.id : eventId,
+				message: parsed.error.message,
+			});
 			migratedEvents.push(candidate as ApplicationEvent);
 		}
 	}
@@ -595,7 +895,9 @@ export function planMigration(input: MigrationInputRecords): MigrationPlan {
 	if (input.events.length !== migratedEvents.length) {
 		mismatches.push(`events: было ${input.events.length}, стало ${migratedEvents.length}`);
 	}
-	mismatches.push(...diffCounts(beforeStageCounts, afterStageCounts));
+	mismatches.push(
+		...diffStageCounts(beforeStageCounts, afterStageCounts, repeatApplications.length),
+	);
 
 	const invariant: MigrationInvariant = {
 		before: {
@@ -635,6 +937,12 @@ export function planMigration(input: MigrationInputRecords): MigrationPlan {
 				['event_source_normalized', 'событие source: manual/пусто → owner'],
 				['event_kind_note_to_touchpoint', 'событие kind: note → touchpoint + touch_kind: other'],
 				['event_touchpoint_missing_touch_kind', 'событие touchpoint без touch_kind → other'],
+				['company_remote_mode_normalized', 'компания remote_mode: синоним/неопределимый факт → канонический член'],
+				['company_stage_normalized', 'компания stage: синоним/неопределимый факт → канонический член или unknown'],
+				['company_type_normalized', 'компания company_type: синоним/неопределимый факт → канонический член или unknown'],
+				['company_interview_language_normalized', 'компания interview_language: синоним языка → other'],
+				['event_reason_note_null_removed', 'событие reason_note: null → поле убрано'],
+				['event_id_synthesized', 'событие id: невалидный/отсутствующий slug → синтезирован по <application_id>-<stage>'],
 			] as const
 		).map(
 			([rule, label]) =>

@@ -16,6 +16,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
 	applyMigration,
+	diffStageCounts,
 	MigrationInvariantError,
 	parseVacancyRef,
 	planMigration,
@@ -157,6 +158,69 @@ describe('слияние компаний по домену', () => {
 	});
 });
 
+describe('нормализация значений компаний', () => {
+	/** Компания с одним изменённым assessed-полем; остальные — 'unknown' по умолчанию. */
+	function companyWithField(field: string, value: string): RawRecord {
+		return rawCompany('acme', 'acme.example.com', {
+			[field]: { value, source: 'manual', confirmed_by_human: true, confirmed_at: TS },
+		});
+	}
+
+	it('remote_mode/stage/company_type: значения-синонимы приводятся к канoническому члену словаря, происхождение факта не трогается', () => {
+		const synonyms: Array<[field: string, from: string, to: string]> = [
+			['remote_mode', 'remote_first', 'remote_100'],
+			['remote_mode', 'remote_global', 'remote_100'],
+			['remote_mode', 'remote_eu', 'remote_country_bound'],
+			['remote_mode', 'remote_country', 'remote_country_bound'],
+			['stage', 'series_b', 'series_b_plus'],
+			['stage', 'series_c', 'series_b_plus'],
+			['stage', 'early', 'seed'],
+			['stage', 'pre_seed_seed', 'seed'],
+			['company_type', 'product_startup', 'startup'],
+			['company_type', 'agency_outsourcing', 'outsourcing_outstaff'],
+		];
+
+		for (const [field, from, to] of synonyms) {
+			const plan = planMigration(input({ companies: [companyWithField(field, from)] }));
+			const patched = (plan.companies[0] as unknown as Record<string, RawRecord>)[field]!;
+			expect(patched.value, `${field}: ${from} → ${to}`).toBe(to);
+			// source/confirmed_at/confirmed_by_human — происхождение факта, не сам факт.
+			expect(patched.source).toBe('manual');
+			expect(patched.confirmed_by_human).toBe(true);
+			expect(patched.confirmed_at).toBe(TS);
+			expect(plan.report.validationErrors).toEqual([]);
+		}
+	});
+
+	it('stage: private, company_type: product, interview_language: es/it — факт не выводится из значения, уходит в unknown/other без словаря-расширения', () => {
+		const noFact: Array<[field: string, from: string, to: string]> = [
+			['stage', 'private', 'unknown'],
+			['company_type', 'product', 'unknown'],
+			['interview_language', 'es', 'other'],
+			['interview_language', 'it', 'other'],
+		];
+
+		for (const [field, from, to] of noFact) {
+			const plan = planMigration(input({ companies: [companyWithField(field, from)] }));
+			const patched = (plan.companies[0] as unknown as Record<string, RawRecord>)[field]!;
+			expect(patched.value, `${field}: ${from} → ${to}`).toBe(to);
+			expect(plan.report.validationErrors).toEqual([]);
+		}
+	});
+
+	it('нормализация значения компании пишется в отчёт с правильным правилом', () => {
+		const plan = planMigration(input({ companies: [companyWithField('remote_mode', 'remote_first')] }));
+		expect(plan.report.normalizations).toContainEqual(
+			expect.objectContaining({
+				rule: 'company_remote_mode_normalized',
+				recordType: 'company',
+				from: 'remote_first',
+				to: 'remote_100',
+			}),
+		);
+	});
+});
+
 // ---------------------------------------------------------------------------
 // 3. planMigration — отклики: id, повторы, нормализация
 // ---------------------------------------------------------------------------
@@ -203,6 +267,94 @@ describe('id отклика и повторный отклик', () => {
 			baseId: 'hh136857307',
 			originalId: 'old-late',
 		});
+	});
+
+	it('перезапись отклика (тот же старый id, тот же applied_at) — один новый id, без суффикса, не коллизия', () => {
+		// Append-only: вторая строка правит первую (другой ts, тот же applied_at), а не
+		// подаёт второй раз.
+		const plan = planMigration(
+			input({
+				companies: [rawCompany('acme', 'acme.example.com')],
+				applications: [
+					rawApplication('billing', 'acme', {
+						vacancy_ref: 'https://hh.ru/vacancy/136857307',
+						applied_at: '2026-08-21T10:18:19Z',
+						ts: '2026-08-21T10:18:19Z',
+					}),
+					rawApplication('billing', 'acme', {
+						vacancy_ref: 'https://hh.ru/vacancy/136857307',
+						applied_at: '2026-08-21T10:18:19Z',
+						ts: '2026-08-21T11:06:44Z',
+					}),
+				],
+			}),
+		);
+
+		expect(plan.applications.map((a) => a.id)).toEqual(['hh136857307', 'hh136857307']);
+		expect(plan.report.repeatApplications).toHaveLength(0);
+		expect(plan.report.validationErrors).toEqual([]);
+		expect(plan.report.applicationAliases).toEqual([{ from: 'billing', to: 'hh136857307' }]);
+	});
+
+	it('повторный отклик под ТЕМ ЖЕ старым id, но разным applied_at, получает -r2 — суффикс достаётся более позднему', () => {
+		const plan = planMigration(
+			input({
+				companies: [rawCompany('acme', 'acme.example.com')],
+				applications: [
+					rawApplication('role-x', 'acme', {
+						vacancy_ref: 'https://hh.ru/vacancy/136857307',
+						applied_at: '2026-08-09T00:00:00Z',
+						ts: '2026-08-09T00:00:00Z',
+					}),
+					rawApplication('role-x', 'acme', {
+						vacancy_ref: 'https://hh.ru/vacancy/136857307',
+						applied_at: '2026-09-02T00:00:00Z',
+						ts: '2026-09-02T00:00:00Z',
+					}),
+				],
+			}),
+		);
+
+		const ids = plan.applications.map((a) => a.id).sort();
+		expect(ids).toEqual(['hh136857307', 'hh136857307-r2']);
+		expect(plan.report.repeatApplications).toHaveLength(1);
+		expect(plan.report.repeatApplications[0]!).toMatchObject({
+			assignedId: 'hh136857307-r2',
+			baseId: 'hh136857307',
+			originalId: 'role-x',
+			appliedAt: '2026-09-02T00:00:00Z',
+		});
+		expect(plan.report.validationErrors).toEqual([]);
+	});
+
+	it('три перезаписи одной записи остаются тремя строками с одним id', () => {
+		const plan = planMigration(
+			input({
+				companies: [rawCompany('acme', 'acme.example.com')],
+				applications: [
+					rawApplication('bp', 'acme', {
+						vacancy_ref: 'https://hh.ru/vacancy/136857307',
+						applied_at: '2026-08-21T10:18:19Z',
+						ts: '2026-08-21T10:18:19Z',
+					}),
+					rawApplication('bp', 'acme', {
+						vacancy_ref: 'https://hh.ru/vacancy/136857307',
+						applied_at: '2026-08-21T10:18:19Z',
+						ts: '2026-08-21T11:06:44Z',
+					}),
+					rawApplication('bp', 'acme', {
+						vacancy_ref: 'https://hh.ru/vacancy/136857307',
+						applied_at: '2026-08-21T10:18:19Z',
+						ts: '2026-08-21T10:18:19Z',
+					}),
+				],
+			}),
+		);
+
+		expect(plan.applications).toHaveLength(3);
+		expect(plan.applications.every((a) => a.id === 'hh136857307')).toBe(true);
+		expect(plan.report.invariant.ok).toBe(true);
+		expect(plan.report.validationErrors).toEqual([]);
 	});
 
 	it('отклик без внешнего id (site/email) сохраняет прежний id', () => {
@@ -297,6 +449,65 @@ describe('нормализация значений', () => {
 		);
 		expect(plan.events[0]!.touch_kind).toBe('other');
 	});
+
+	it('событие reason_note: null исчезает, а не становится пустой строкой', () => {
+		const plan = planMigration(
+			input({
+				companies: [rawCompany('acme', 'acme.example.com')],
+				applications: [rawApplication('a1', 'acme')],
+				events: [rawEvent('e1', 'a1', { reason_note: null })],
+			}),
+		);
+		const event = plan.events[0]!;
+		expect(event.reason_note).toBeUndefined();
+		expect(event.reason_note === '').toBe(false);
+		expect(plan.report.normalizations).toContainEqual(
+			expect.objectContaining({ rule: 'event_reason_note_null_removed', recordType: 'event', from: null }),
+		);
+		expect(plan.report.validationErrors).toEqual([]);
+	});
+
+	it('событие с id длиннее 64 символов (реальный случай в леджере) получает синтезированный id и не коллидирует с уже существующим id в том же файле', () => {
+		const plan = planMigration(
+			input({
+				companies: [rawCompany('acme', 'acme.example.com')],
+				applications: [rawApplication('a1', 'acme')],
+				events: [
+					// Занимает базовый id заранее — вторая запись обязана получить суффикс.
+					rawEvent('a1-applied', 'a1', { stage: 'applied' }),
+					rawEvent('x'.repeat(70), 'a1', { stage: 'applied' }),
+				],
+			}),
+		);
+
+		const ids = plan.events.map((e) => e.id);
+		expect(new Set(ids).size).toBe(2);
+		expect(ids).toContain('a1-applied');
+		const synthesized = ids.find((id) => id !== 'a1-applied')!;
+		expect(synthesized.startsWith('a1-applied-')).toBe(true);
+		expect(plan.report.normalizations).toContainEqual(
+			expect.objectContaining({ rule: 'event_id_synthesized', recordType: 'event', to: synthesized }),
+		);
+		expect(plan.report.validationErrors).toEqual([]);
+	});
+
+	it('синтез id события учитывает application_id ПОСЛЕ переписывания по карте алиасов', () => {
+		// vacancy_ref даёт отклику новый id (hh…) — событие без своего id обязано
+		// синтезироваться от НОВОЙ ссылки, а не от старой.
+		const plan = planMigration(
+			input({
+				companies: [rawCompany('acme', 'acme.example.com')],
+				applications: [
+					rawApplication('old-app', 'acme', { vacancy_ref: 'https://hh.ru/vacancy/136857307' }),
+				],
+				events: [rawEvent('placeholder', 'old-app', { stage: 'applied', id: null })],
+			}),
+		);
+
+		expect(plan.applications[0]!.id).toBe('hh136857307');
+		expect(plan.events[0]!.application_id).toBe('hh136857307');
+		expect(plan.events[0]!.id).toBe('hh136857307-applied');
+	});
 });
 
 // ---------------------------------------------------------------------------
@@ -322,6 +533,35 @@ describe('переписанные ссылки событий', () => {
 			from: 'old-app',
 			to: 'hh136857307',
 		});
+	});
+
+	it('при повторном отклике под одним старым application_id событие резолвится в occurrence по своему ts', () => {
+		const plan = planMigration(
+			input({
+				companies: [rawCompany('acme', 'acme.example.com')],
+				applications: [
+					rawApplication('role-x', 'acme', {
+						vacancy_ref: 'https://hh.ru/vacancy/111',
+						applied_at: '2026-08-09T00:00:00Z',
+						ts: '2026-08-09T00:00:00Z',
+					}),
+					rawApplication('role-x', 'acme', {
+						vacancy_ref: 'https://hh.ru/vacancy/222',
+						applied_at: '2026-09-02T00:00:00Z',
+						ts: '2026-09-02T00:00:00Z',
+					}),
+				],
+				events: [
+					rawEvent('e-early', 'role-x', { ts: '2026-08-09T00:00:00Z', stage: 'applied' }),
+					rawEvent('e-late', 'role-x', { ts: '2026-09-02T00:00:00Z', stage: 'applied' }),
+				],
+			}),
+		);
+
+		const earlyEvent = plan.events.find((e) => e.id === 'e-early')!;
+		const lateEvent = plan.events.find((e) => e.id === 'e-late')!;
+		expect(earlyEvent.application_id).toBe('hh111');
+		expect(lateEvent.application_id).toBe('hh222');
 	});
 });
 
@@ -367,6 +607,56 @@ describe('инвариант счётчиков и стадий', () => {
 		// app-3 не имеет stage_change ни разу — должен остаться в стадии "_none" по обе стороны.
 		expect(plan.report.invariant.after.stageCounts._none).toBe(1);
 		expect(plan.report.validationErrors).toEqual([]);
+	});
+
+	it('разведённый повтор прибавляет стадию ровно на себя, и инвариант это принимает', () => {
+		// Два отклика на одну вакансию под одним старым id: до миграции fold видел ОДИН
+		// отклик и одну стадию applied, после — два. Прибавка тут не потеря контроля, а
+		// то, ради чего суффикс -rN и заведён: второй отклик перестаёт быть невидимым.
+		const raw = buildLedger();
+		raw.applications.push(
+			rawApplication('app-1', 'rho-b', {
+				vacancy_ref: 'https://hh.ru/vacancy/111',
+				applied_at: '2026-08-20T00:00:00Z',
+			}),
+		);
+		raw.events.push(rawEvent('e5', 'app-1', { stage: 'applied', ts: '2026-08-20T00:00:00Z' }));
+
+		const plan = planMigration(raw);
+
+		expect(plan.report.repeatApplications).toHaveLength(1);
+		expect(plan.report.invariant.ok).toBe(true);
+
+		// Проверяется суммарная прибавка, а не конкретная стадия: у разведённого повтора
+		// события могут не найтись вовсе (оба отклика делили один id, и поток событий под
+		// ним неразделим), и тогда он встаёт в `_none`. Инвариант охраняет ровно то, что
+		// прибавка объяснена числом повторов, а не то, в какую корзину она легла.
+		const sum = (counts: Record<string, number>): number =>
+			Object.values(counts).reduce((acc, n) => acc + n, 0);
+		expect(
+			sum(plan.report.invariant.after.stageCounts) - sum(plan.report.invariant.before.stageCounts),
+		).toBe(1);
+	});
+
+	it('прибавка, которую нечем объяснить разведёнными повторами, роняет инвариант', () => {
+		const raw = buildLedger();
+		const plan = planMigration(raw);
+		// Подделываем ровно один вход инварианта — распределение «после». Так проверяется
+		// сама формула, а не побочный эффект какой-нибудь нормализации.
+		const mismatches = diffStageCounts(
+			{ applied: 2, replied: 1 },
+			{ applied: 4, replied: 1 },
+			plan.report.repeatApplications.length,
+		);
+
+		expect(mismatches).toHaveLength(1);
+		expect(mismatches[0]).toContain('нечем объяснить');
+	});
+
+	it('исчезнувшая стадия роняет инвариант всегда, сколько бы ни было повторов', () => {
+		const mismatches = diffStageCounts({ applied: 2, replied: 1 }, { applied: 3 }, 1);
+
+		expect(mismatches.some((m) => m.includes('стадия replied') && m.includes('потеряна'))).toBe(true);
 	});
 });
 
