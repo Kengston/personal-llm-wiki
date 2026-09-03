@@ -23,7 +23,15 @@ import {
 	type ApplicationRecord,
 	type ApplicationStage,
 } from './events.js';
-import { computeFunnel, durationStat, formatRate, rate, wilson, TREND_N } from './funnel.js';
+import {
+	computeFunnel,
+	dedupeApplications,
+	durationStat,
+	formatRate,
+	rate,
+	wilson,
+	TREND_N,
+} from './funnel.js';
 import { createJobsearchLedger, type JobsearchLedger } from './ledger.js';
 import { buildFunnelXlsx, buildXlsx, columnName } from './xlsx.js';
 
@@ -273,11 +281,92 @@ describe('Rate и статистическая честность', () => {
 });
 
 // ---------------------------------------------------------------------------
+// 3a. dedupeApplications — сведение строк леджера по id ([ADR-0029])
+// ---------------------------------------------------------------------------
+
+describe('dedupeApplications', () => {
+	it('строки леджера с одним id сводятся в одну запись, а не считаются N откликами', () => {
+		const rows = [
+			application('a1', { ts: '2026-06-01T00:00:00Z' }),
+			application('a1', { ts: '2026-06-02T00:00:00Z' }),
+		];
+
+		expect(dedupeApplications(rows)).toHaveLength(1);
+	});
+
+	it('уникальные id дедуп не трогает', () => {
+		const rows = [application('a1'), application('a2')];
+
+		expect(dedupeApplications(rows)).toHaveLength(2);
+	});
+
+	it('слияние: поле, отсутствующее в строке с более поздним ts, добирается из более ранней строки той же группы', () => {
+		// Боевой паттерн (li4440166263 и ещё 24 группы в леджере): перезапись, более поздняя
+		// по ts, писалась урезанным набором полей — без applied_via, хотя он был в исходной
+		// подаче. Наивный latest-wins стёр бы факт «где подал».
+		const early = application('a1', { ts: '2026-06-01T00:00:00Z', applied_via: 'linkedin' });
+		const late = application('a1', { ts: '2026-06-02T00:00:00Z' }); // applied_via отсутствует
+
+		const [merged] = dedupeApplications([early, late]);
+
+		expect(merged!.applied_via).toBe('linkedin');
+		// «Текущесть» результата всё равно от поздней строки — это не «ранняя строка
+		// побеждает целиком», а именно слияние двух строк в одну.
+		expect(merged!.ts).toBe('2026-06-02T00:00:00Z');
+	});
+
+	it('это слияние, а не выбор одной строки: поля из разных строк группы присутствуют одновременно', () => {
+		const early = application('a1', { ts: '2026-06-01T00:00:00Z', variant_id: 'ru-backend' });
+		const late = application('a1', { ts: '2026-06-02T00:00:00Z', applied_via: 'hh' });
+
+		const [merged] = dedupeApplications([early, late]);
+
+		expect(merged!.variant_id).toBe('ru-backend');
+		expect(merged!.applied_via).toBe('hh');
+	});
+
+	it('результат не зависит от порядка строк в леджере', () => {
+		const early = application('a1', { ts: '2026-06-01T00:00:00Z', applied_via: 'linkedin' });
+		const late = application('a1', { ts: '2026-06-02T00:00:00Z' });
+
+		expect(dedupeApplications([early, late])).toEqual(dedupeApplications([late, early]));
+	});
+
+	it('группа из трёх строк с совпадающим ts у части из них сводится корректно (боевой паттерн li4455270175)', () => {
+		const rows = [
+			application('a1', { ts: '2026-06-01T00:00:00Z', applied_via: 'linkedin' }),
+			application('a1', { ts: '2026-06-01T00:00:00Z' }), // тот же ts, без applied_via
+			application('a1', { ts: '2026-06-02T00:00:00Z' }), // самая поздняя, тоже без applied_via
+		];
+
+		const merged = dedupeApplications(rows);
+
+		expect(merged).toHaveLength(1);
+		expect(merged[0]!.applied_via).toBe('linkedin');
+		expect(merged[0]!.ts).toBe('2026-06-02T00:00:00Z');
+	});
+});
+
+// ---------------------------------------------------------------------------
 // 4. computeFunnel
 // ---------------------------------------------------------------------------
 
 describe('computeFunnel', () => {
 	const opts = { asOf: ASOF, ghostAfterDays: 21, connectedSources: ['manual'] };
+
+	it('дубли одного id по строкам леджера не задваивают total и знаменатели конверсий (регресс: 436 строк / 410 откликов в бою)', () => {
+		const apps = [
+			application('a1', { ts: '2026-06-01T00:00:00Z', applied_via: 'linkedin' }),
+			application('a1', { ts: '2026-06-02T00:00:00Z' }), // перезапись без applied_via
+		];
+		const events = [stageEvent('a1', 'replied', '2026-06-05T00:00:00Z')];
+
+		const report = computeFunnel(apps, events, opts);
+
+		expect(report.total).toBe(1);
+		expect(report.byStage.replied).toBe(1);
+		expect(report.conversions['applied→replied']).toMatchObject({ numerator: 1, denominator: 1 });
+	});
 
 	it('заявка, дошедшая до оффера, остаётся в знаменателе предыдущих стадий', () => {
 		// У статус-модели это и не получается: она больше не помнит, что проходила скрининг.
@@ -395,6 +484,66 @@ describe('computeFunnel', () => {
 		expect(report.total).toBe(0);
 		expect(report.ghost.value).toBeNull();
 		expect(report.ttfrDays.median).toBeNull();
+	});
+});
+
+// ---------------------------------------------------------------------------
+// 4a. Разрез по площадке и точка отсечения ([PRD] US 27/29/30)
+// ---------------------------------------------------------------------------
+
+describe('разрез по platform и точка отсечения по площадке', () => {
+	const opts = { asOf: ASOF, ghostAfterDays: 21, connectedSources: ['manual', 'hh'] };
+
+	it('разрез по platform считается тем же механизмом, что остальные, и совпадает с ручным подсчётом', () => {
+		// Ручной подсчёт: hh — 2 отклика, у ОБОИХ есть внешнее событие (replied и rejected —
+		// оба не входят в OWNER_INITIATED, оба двигают lastExternalAt) → replied 2 из 2.
+		// linkedin — 1 отклик, событий нет → replied 0 из 1.
+		const apps = [
+			application('a1', { platform: 'hh' }),
+			application('a2', { platform: 'hh' }),
+			application('a3', { platform: 'linkedin' }),
+		];
+		const events = [
+			stageEvent('a1', 'replied', '2026-06-05T00:00:00Z'),
+			stageEvent('a2', 'rejected', '2026-06-06T00:00:00Z', { reason_code: 'stack_mismatch' }),
+		];
+
+		const report = computeFunnel(apps, events, opts);
+
+		expect(report.breakdowns.platform.hh).toMatchObject({
+			replied: { numerator: 2, denominator: 2 },
+		});
+		expect(report.breakdowns.platform.linkedin).toMatchObject({
+			replied: { numerator: 0, denominator: 1 },
+		});
+	});
+
+	it('отклик раньше точки отсечения своей площадки не входит в её разрез, но входит в общую конверсию', () => {
+		// PRD US 27: у hh since 2026-09-01 — 78 исторических откликов не должны портить
+		// конверсию ПО ПЛОЩАДКЕ, но общая воронка (applied→replied) историю не теряет.
+		const apps = [
+			application('old-hh', { platform: 'hh', applied_at: '2026-08-01T00:00:00Z' }),
+			application('new-hh', { platform: 'hh', applied_at: '2026-09-05T00:00:00Z' }),
+		];
+		const events = [stageEvent('old-hh', 'replied', '2026-08-05T00:00:00Z')];
+
+		const report = computeFunnel(apps, events, { ...opts, platformCutoffs: { hh: '2026-09-01' } });
+
+		// Разрез «По площадке»: old-hh исключён ЦЕЛИКОМ — ни в total, ни в числитель.
+		expect(report.breakdowns.platform.hh).toMatchObject({
+			replied: { numerator: 0, denominator: 1 },
+		});
+
+		// Общая конверсия видит ОБА отклика — cutoff площадки её не касается.
+		expect(report.conversions['applied→replied']).toMatchObject({ numerator: 1, denominator: 2 });
+	});
+
+	it('без карты отсечения разрез по площадке ведёт себя как раньше — без фильтра', () => {
+		const apps = [application('a1', { platform: 'hh', applied_at: '2026-01-01T00:00:00Z' })];
+
+		const report = computeFunnel(apps, [], opts);
+
+		expect(report.breakdowns.platform.hh).toMatchObject({ replied: { denominator: 1 } });
 	});
 });
 

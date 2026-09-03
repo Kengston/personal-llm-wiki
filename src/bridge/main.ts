@@ -11,6 +11,7 @@ import dotenvFlow from 'dotenv-flow';
 
 dotenvFlow.config({ silent: true });
 
+import { applyFinanceGate } from '../core/feature-flags.js';
 import { childLogger } from '../core/logger.js';
 import { createCareerLedger, resolveCareerDir, type CareerLedger } from '../ingest/career/store.js';
 import {
@@ -52,36 +53,66 @@ async function main(): Promise<void> {
 	const resumeEngineFor = (projectPath: string) =>
 		buildEngineFromEnv(process.env, { repoPath: projectPath });
 
-	// Финансовый леджер (ADR-0024): создаём из окружения если задан FINANCE_RAW_DIR,
-	// RAW_DIR или CONTENT_ROOT (resolveFinanceDir). Если переменных нет — используем
-	// дефолтный ~/llm-wiki-content/raw/finance (Ledger создаётся, но каталог не трогается
-	// до первой записи). Опционально: при ошибке инициализации (неправильные пути) мост
-	// стартует без финансового шва (financeLedger = undefined → блок в app.ts не активен).
-	let financeLedger: FinanceLedger | undefined;
+	// financeGoalsDir/financeStateDir заполняются ТОЛЬКО колбэком applyFinanceGate ниже
+	// (только когда FINANCE_ENABLED реально включён и леджер создался) — до вызова гейта
+	// они не определены, и это корректно: без леджера этим каталогам взяться не из чего.
 	let financeGoalsDir: string | undefined;
 	// financeStateDir — каталог мутабельного состояния финпроактива (.finance-state/):
 	// pending-cash-survey (ответ числом на опрос налички) и last-input watermark
 	// (idle-нудж). Без него оба механизма #8 молча пропускаются — поэтому ОБЯЗАТЕЛЬНО
 	// пробрасываем его в BridgeState (иначе app.ts получит undefined, как было до фикса).
 	let financeStateDir: string | undefined;
-	try {
-		financeLedger = createLedger({ env: process.env });
-		// goals-каталог: wiki/finance/goals/ в приватном репо (WIKI_REPO_PATH) или CONTENT_ROOT.
-		const contentRoot =
-			(process.env.CONTENT_ROOT ?? '').trim() || (wikiRepo ? wikiRepo : undefined);
-		if (contentRoot) {
-			financeGoalsDir = join(contentRoot, 'wiki', 'finance', 'goals');
-		}
-		// Состояние проактива резолвится из окружения (CONTENT_ROOT/.finance-state по умолчанию).
-		financeStateDir = resolveFinanceStateDir(process.env);
-		log.info(
-			{ financeDir: resolveFinanceDir(process.env), financeGoalsDir, financeStateDir },
-			'finance.ledger_ready',
-		);
-	} catch (err) {
-		// Нестандартный сетап или ошибка резолвинга — мост стартует без финансового шва.
-		log.warn({ err: String(err) }, 'finance.ledger_init_failed — finance-intent отключён');
-		financeLedger = undefined;
+	// Каталог состояния проактива общий на подсистемы (ключи разведены префиксом `js:`),
+	// и от финансов он не зависит. Резолвится ДО гейта и отдельно от него: пока он брался
+	// из финансовой ветки, выключенный FINANCE_ENABLED гасил заодно и проактив поиска
+	// работы — механика fired/snooze молча оставалась без каталога. Резолвер чистый,
+	// каталог не создаётся до первой записи.
+	const proactiveStateDir = resolveFinanceStateDir(process.env);
+
+	// Персона реактивного моста ([ADR-0016]): читаем ДО финансового гейта — applyFinanceGate
+	// решает, достраивать её финансовой инструкцией или отдавать как есть.
+	const basePersona = loadPersona(personaFile);
+
+	// FINANCE_ENABLED (default-off, US 68, [01-decisions.md] D9, R7 п.8): создавать ли
+	// финансовый леджер И добавлять ли финансовую инструкцию к персоне решает
+	// `applyFinanceGate` (src/core/feature-flags.ts) — main.ts само условие не пишет,
+	// а только отдаёт ему, КАК создать леджер и КАК достроить персону, если флаг включён.
+	// При выключенном флаге ни один из колбэков ниже не вызывается вовсе: финансовых
+	// данных нет, а модуль без данных всё равно платил бы контекстом за инструкцию в
+	// промпте каждого хода бота — поэтому не «создали и проигнорировали», а не создали.
+	const financeGate = applyFinanceGate(process.env, basePersona, {
+		createLedger: () => {
+			try {
+				const ledger = createLedger({ env: process.env });
+				// goals-каталог: wiki/finance/goals/ в приватном репо (WIKI_REPO_PATH) или CONTENT_ROOT.
+				const contentRoot =
+					(process.env.CONTENT_ROOT ?? '').trim() || (wikiRepo ? wikiRepo : undefined);
+				if (contentRoot) {
+					financeGoalsDir = join(contentRoot, 'wiki', 'finance', 'goals');
+				}
+				// Состояние проактива резолвится из окружения (CONTENT_ROOT/.finance-state по умолчанию).
+				financeStateDir = resolveFinanceStateDir(process.env);
+				log.info(
+					{ financeDir: resolveFinanceDir(process.env), financeGoalsDir, financeStateDir },
+					'finance.ledger_ready',
+				);
+				return ledger;
+			} catch (err) {
+				// Нестандартный сетап или ошибка резолвинга — мост стартует без финансового шва.
+				log.warn({ err: String(err) }, 'finance.ledger_init_failed — finance-intent отключён');
+				return undefined;
+			}
+		},
+		// Дефект 2: передаём financeGoalsDir чтобы движок видел goal_id в системном промпте
+		// и мог корректно эмитировать query/goal_progress (без этого сваливался в feasibility).
+		// Контекст (балансы, net-worth) статичный на старт процесса — приемлемо для
+		// single-user single-session моста (ходы сериализованы, следующий старт подтянет свежий).
+		appendInstruction: (ledger) =>
+			appendFinanceInstruction(basePersona, buildFinanceContextSummary(ledger, financeGoalsDir)),
+	});
+	const financeLedger: FinanceLedger | undefined = financeGate.ledger;
+	if (!financeLedger) {
+		log.info('finance.disabled — FINANCE_ENABLED не задан либо инициализация леджера не удалась');
 	}
 
 	// Карьерная база ([ADR-0028]): каталог резолвится из окружения (CAREER_RAW_DIR →
@@ -107,22 +138,11 @@ async function main(): Promise<void> {
 		jobsearchLedger = undefined;
 	}
 
-	// Персона с финансовой инструкцией (ADR-0024): если леджер доступен — добавляем
-	// finance-intent протокол и снапшот финансового контекста (балансы, net-worth)
-	// на момент старта. Контекст статичный на старт процесса — приемлемо для single-user
-	// single-session моста (ходы сериализованы, следующий старт подтянет свежий контекст).
-	const basePersona = loadPersona(personaFile);
-	// Дефект 2: передаём financeGoalsDir чтобы движок видел goal_id в системном промпте
-	// и мог корректно эмитировать query/goal_progress (без этого сваливался в feasibility).
-	const financeContext = financeLedger
-		? buildFinanceContextSummary(financeLedger, financeGoalsDir)
-		: null;
-	const withFinance = financeLedger
-		? appendFinanceInstruction(basePersona, financeContext)
-		: basePersona;
 	// Карьерный протокол добавляется отдельно: модули независимы, и включённые финансы
 	// не должны быть условием работы резюме (и наоборот).
-	const withCareer = careerLedger ? appendCareerInstruction(withFinance) : withFinance;
+	const withCareer = careerLedger
+		? appendCareerInstruction(financeGate.persona)
+		: financeGate.persona;
 	const systemPrompt = jobsearchLedger ? appendJobsearchInstruction(withCareer) : withCareer;
 
 	const state = new BridgeState({
@@ -138,9 +158,7 @@ async function main(): Promise<void> {
 		financeStateDir,
 		careerLedger,
 		jobsearchLedger,
-		// Каталог состояния проактива общий с финансовым: механика fired/snooze не
-		// финансово-специфична, ключи разведены префиксом `js:`.
-		jobsearchStateDir: financeStateDir,
+		jobsearchStateDir: proactiveStateDir,
 	});
 	if (sessionsCfg.enabled) {
 		log.info(

@@ -39,9 +39,57 @@ const slugId = z
 	.max(64)
 	.regex(/^[a-z0-9][a-z0-9_.-]*$/);
 
-/** Три канала добычи — ровно три (D4). Четвёртый не заводится без ADR. */
-export const COMPANY_SOURCES = ['manual', 'linkedin_export', 'web_search'] as const;
-const companySource = z.enum(COMPANY_SOURCES);
+/**
+ * PLATFORM_IDS — площадки ([ADR-0033]). Каждому id соответствует РОВНО ОДНА страница
+ * реестра `wiki/jobsearch/platforms/<id>.md` в хранилище, и наоборот; расхождение
+ * ловит `wiki:lint`. Добавить площадку = строка сюда + страница там; ADR на это больше
+ * не нужен — ради того реестр и заведён.
+ *
+ * Порядок обхода в дневной рутине здесь НЕ задаётся: он живёт в поле `order` страницы
+ * реестра, потому что меняется от недели к неделе, а этот список — словарь значений.
+ */
+export const PLATFORM_IDS = [
+	'hh',
+	'linkedin',
+	'ashby',
+	'greenhouse',
+	'lever',
+	'join',
+	'smartrecruiters',
+	'workable',
+	'icims',
+	'site',
+	'email',
+] as const;
+
+export type PlatformId = (typeof PLATFORM_IDS)[number];
+export const platformId = z.enum(PLATFORM_IDS);
+
+/**
+ * Площадки, с которых компания может ПОПАСТЬ в воронку — `kind: aggregator | network`
+ * страницы реестра. Только они имеют смысл как `company_source`: с ATS компания в
+ * воронку не приходит, туда приходит уже найденная компания подавать форму.
+ */
+export const DISCOVERY_PLATFORM_IDS = ['hh', 'linkedin'] as const satisfies readonly PlatformId[];
+
+/** Значения `company_source`, которые площадками не являются вовсе. */
+export const NON_PLATFORM_SOURCES = ['manual', 'linkedin_export', 'web_search'] as const;
+
+/**
+ * Каналы добычи = не-площадочные значения плюс id площадок-агрегаторов ([ADR-0033]).
+ *
+ * `hh` появился поимённо в [ADR-0031]: строка покрытия (§ sourceCoverageLine, D11) обязана
+ * перечислять источники по именам, а hh — вдобавок другой рынок (рубли, российские юрлица,
+ * русскоязычные интервью). `linkedin` легализован тем же ходом: 34 отклика с этим значением
+ * писались агентом мимо валидации и молча выпадали из воронки, хотя факт верен — компания
+ * найдена живым поиском в LinkedIn, а не из файла экспорта (это `linkedin_export`).
+ *
+ * ЕДИНСТВЕННОЕ место, где живёт этот словарь. `applications.jsonl` ([ADR-0030]) и схема
+ * интентов моста импортируют его отсюда: второй литерал уже расходился с этим — источник
+ * проходил валидацию компании и падал на валидации отклика, то есть ПОСЛЕ отправки.
+ */
+export const COMPANY_SOURCES = [...NON_PLATFORM_SOURCES, ...DISCOVERY_PLATFORM_IDS] as const;
+export const companySource = z.enum(COMPANY_SOURCES);
 
 /** Трёхзначный признак: `unknown` — легальное и частое состояние. */
 const triState = z.enum(['yes', 'no', 'unknown']);
@@ -135,7 +183,19 @@ export const OpportunityRecordSchema = z.object({
 	id: slugId,
 	company_id: slugId,
 	title: z.string().min(1).max(200),
-	/** URL без query. Санитайзер по нему НЕ ходит — это типизированное поле, не текст. */
+	/**
+	 * Где вакансия найдена или размещена ([ADR-0033]). Опционально: записи, заведённые до
+	 * реестра площадок, обязаны читаться дальше — миграция проставляет поле там, где может
+	 * вывести его из ссылки, и оставляет пустым там, где вывести не из чего.
+	 */
+	platform: platformId.optional(),
+	/**
+	 * URL без query. Санитайзер по нему НЕ ходит — это типизированное поле, не текст.
+	 *
+	 * Это тот же факт, который у отклика называется `url`: имя `source_url` зафиксировано
+	 * [ADR-0029] и [ADR-0031] и потому не переименовывается, а у отклика поля не было вовсе
+	 * и оно заведено под именем из [ADR-0033]. Пара названий описана в доменном глоссарии.
+	 */
 	source_url: z.string().url().optional(),
 	/**
 	 * Внешний идентификатор площадки. Хранится с буквенным префиксом БЕЗ разделителя

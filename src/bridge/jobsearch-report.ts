@@ -73,7 +73,11 @@ export function loadReportConfig(env: NodeJS.ProcessEnv = process.env): ReportCo
 			Number.isFinite(ghostAfterDays) && ghostAfterDays > 0
 				? ghostAfterDays
 				: REPORT_DEFAULTS.ghostAfterDays,
-		connectedSources: (env.JOBSEARCH_SOURCES ?? 'manual')
+		// Пустой список означает «вывести из данных», а не «подключён только manual».
+		// Жёсткий дефолт врал строкой покрытия (D11): сервис печатал «подключённых
+		// источников: 1 (manual)», имея на той же странице разрезы по hh и linkedin.
+		// Переменная окружения остаётся переопределением ПОВЕРХ вывода из данных.
+		connectedSources: (env.JOBSEARCH_SOURCES ?? '')
 			.split(',')
 			.map((s) => s.trim())
 			.filter(Boolean),
@@ -152,12 +156,17 @@ export function buildReportApp(deps: ReportDeps): FastifyInstance {
 	};
 
 	/** Снимок пересчитывается на каждый запрос: кэша в подсистеме нет вовсе. */
-	const snapshot = (): FunnelReport =>
-		computeFunnel(ledger.readAll('applications'), ledger.readAll('application_events'), {
+	const snapshot = (): FunnelReport => {
+		const applications = ledger.readAll('applications');
+		return computeFunnel(applications, ledger.readAll('application_events'), {
 			asOf: nowFn().toISOString(),
 			ghostAfterDays: config.ghostAfterDays,
-			connectedSources: config.connectedSources,
+			connectedSources:
+				config.connectedSources.length > 0
+					? config.connectedSources
+					: [...new Set(applications.map((a) => a.company_source))].sort(),
 		});
+	};
 
 	app.get('/api/stats', async (req, reply) => {
 		if (!guard(req, reply)) return;

@@ -29,6 +29,12 @@ const TEXT_SUFFIXES = new Set([
 const SKIP_DIRS = new Set([
 	'.git', '__pycache__', '.venv', 'venv', 'node_modules', '.idea', '.vscode',
 	'.mypy_cache', '.pytest_cache', '.ruff_cache', 'dist', 'build', 'graphify-out', '.DS_Store',
+	// Локальное состояние инструментов: в git не попадает (лежит в
+	// .git/info/exclude), но на диске рядом с кодом. Снапшоты профилей и логи
+	// прогонов полны коммит-хэшей, и scan_secrets честно принимает их за
+	// entropy:hex. Сканировать то, чего в публичной истории не будет, — значит
+	// ловить ложные срабатывания на ровном месте.
+	'.autodev', '.claude',
 ]);
 
 // Файлы, которые не сканируем: лок-файлы пакетов = тонны high-entropy-хэшей

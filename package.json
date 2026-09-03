@@ -24,7 +24,14 @@
 		"jobsearch:report": "pnpm build && node dist/bridge/jobsearch-report.js",
 		"career:directory": "pnpm build && node scripts/career-directory.mjs",
 		"career:render": "pnpm build && node scripts/career-render.mjs",
-		"jobsearch:import-linkedin": "pnpm build && node scripts/jobsearch-import-linkedin.mjs"
+		"jobsearch:import-linkedin": "pnpm build && node scripts/jobsearch-import-linkedin.mjs",
+		"jobsearch:append": "pnpm build && node scripts/jobsearch-append.mjs",
+		"jobsearch:validate": "pnpm build && node scripts/jobsearch-validate.mjs",
+		"jobsearch:migrate": "pnpm build && node scripts/migrate-2026-09-platforms.mjs",
+		"jobsearch:funnel-page": "pnpm build && node scripts/funnel-page.mjs",
+		"learn:append": "pnpm build && node scripts/learn-append.mjs",
+		"learn:due": "pnpm build && node scripts/learn-due.mjs",
+		"wiki:lint": "pnpm build && node scripts/wiki-lint.mjs"
 	},
 	"dependencies": {
 		"@resvg/resvg-js": "^2.6.2",

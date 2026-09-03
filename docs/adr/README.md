@@ -2,7 +2,7 @@
 title: Индекс ADR — архитектурные решения «Второго мозга»
 type: index
 status: in-progress
-last_updated: 2026-08-02
+last_updated: 2026-09-03
 ---
 
 # Индекс ADR — «Второй мозг»
@@ -14,6 +14,7 @@ last_updated: 2026-08-02
 ## Статусы
 
 - **accepted** — действует.
+- **proposed** — принято на грумминге, реализация идёт; становится accepted после проверки фазы 5 плана.
 - **superseded by ADR-NNNN** — заменён более поздним решением (исторический контекст сохранён).
 
 ## Каталог
@@ -50,6 +51,11 @@ last_updated: 2026-08-02
 | [0028](0028-career-data-module.md) | Модуль данных карьеры («Поиск работы», 1/3): append-only JSONL в приватном `raw/career/` + zod (параметризованный `Ledger`, не копия финансового), правка = новая строка через кнопки; числа — только записи `metric` с `as_of`/`source`, в тексте плейсхолдеры `{{metric.key}}`; `position.org_key` вместо названия работодателя; EN/RU без молчаливого фолбэка; контакты — только ключи. Наследует [0018](0018-finance-module.md)/[0003](0003-two-repos-public-private.md)/[0010](0010-wiki-content-model.md)/[0015](0015-capture-write-path-permission-posture.md). | accepted |
 | [0029](0029-company-discovery-and-network-access.md) | Discovery целевых компаний («Поиск работы», 2/3): сеть — в детерминированном Node-слое моста за allowlist (robots, rate-limit, потолок размера, «не бросает»), движок остаётся без сети; три канала добычи (`company_source`: `manual`/`linkedin_export`/`web_search`), `company`/`opportunity` в `raw/jobsearch/`, гейты отсекают — ранжирует ручной вес; никакого скрейпинга и автооткликов. Расширяет [0015](0015-capture-write-path-permission-posture.md)/[0027](0027-incoming-multimodal-media.md), уважает [0009](0009-tos-safe-engine-access.md)/[0011](0011-relevance-sensitivity-filter.md)/[0007](0007-engine-spawn-and-scheduler.md). | accepted |
 | [0030](0030-jobsearch-funnel-reporting.md) | Отчётность по воронке («Поиск работы», 3/3): `applications.jsonl` + append-only `application_events.jsonl` (`kind: stage_change`/`touchpoint`), стадия не хранится — вычисляется fold'ом; метрики с обязательным `n` и интервалом Уилсона; отдельный Fastify-инстанс на loopback (токен + `Host`, read-only, вне туннеля); экспорт `.xlsx`/`.html` без новых зависимостей; проактив — только под запись в леджере. Расширяет [0018](0018-finance-module.md)/[0025](0025-finance-visualization-render.md)/[0026](0026-finance-proactive-and-callbacks.md). | accepted |
+| [0031](0031-hh-channel.md) | hh.ru как четвёртый канал добычи: `company_source` += `hh` (словарь переезжает в одно место — дубль литерала в `events.ts` падал на валидации отклика ПОСЛЕ отправки); транспорт — DOM живой сессии владельца через Chrome-MCP, не загрузчик моста (публичный API hh отвечает `403` без токена приложения, а ходить в него с куками сессии запрещает [0009](0009-tos-safe-engine-access.md)); дедуп по псевдо-домену `<employerId>.employer.hh.ru`; 76 исторических откликов заводятся импортом с `confirmed_by_human: false`. Расширяет [0029](0029-company-discovery-and-network-access.md)/[0030](0030-jobsearch-funnel-reporting.md). | accepted |
+| [0032](0032-storage-self-contained-schema.md) | Хранилище самодостаточно: схема (полки, типы, ingest/query/lint, леджеры) живёт в `CLAUDE.md` контент-репо; `compiler/rules.md` — generic-шаблон; движок читает только фиксированные пути; полки `work/`, `docs/`, `learning/`, `wiki/jobsearch/`. | proposed |
+| [0033](0033-platform-registry-and-vacancy-identity.md) | Площадка как сущность реестра `wiki/jobsearch/platforms/<id>.md`; поля `platform`/`external_id`/`url`/`applied_via` на вакансии и отклике; `COMPANY_SOURCES` = не-площадочные + id площадок (легализует `linkedin`); детерминированные id; миграция скриптом с инвариантом счётчиков. | proposed |
+| [0034](0034-learning-contour.md) | Учебный контур: `raw/learning/` (транскрипты + `reviews.jsonl`), `wiki/sources/` + `wiki/concepts/`, состояние повторений только в леджере (Лейтнер через `pnpm learn:due`), воркспейс `learning/` в формате `/teach`, занятие 30 минут по рутине под артефакт. | proposed |
+| [0035](0035-ledger-single-write-path.md) | Единственный путь записи в леджер: `pnpm jobsearch:append` с zod-валидацией до append, `jobsearch:validate` в lint; прямая дозапись строк из скиллов убирается. | proposed |
 
 ## Сквозные темы
 
@@ -57,7 +63,7 @@ last_updated: 2026-08-02
 - **Память и контент.** [0002](0002-no-embedder-pure-karpathy.md) (без вектора) + [0010](0010-wiki-content-model.md) (типы страниц, правило сжатия кода).
 - **Репозитории и хостинг.** [0003](0003-two-repos-public-private.md) (public/private split) + [0006](0006-github-account-kengston.md) (аккаунт) + [0005](0005-host-v1-macbook-portable.md) (host) + remote-routine-апгрейд в [0007](0007-engine-spawn-and-scheduler.md).
 - **Интерфейс и проактив.** [0004](0004-telegram-bridge-reactive-proactive.md) (Telegram-bridge) + транспорт по умолчанию — long polling [0014](0014-telegram-transport-long-polling.md) (webhook → опция) + транспорт-расширение под медиа/инлайн-кнопки/opt-in `parse_mode` [0023](0023-telegram-transport-media-and-callbacks.md) + формат reminders/sweep в [0007](0007-engine-spawn-and-scheduler.md) + чтение/продолжение локальных сессий Claude Code из Telegram (отдельная полоса, local-first) в [0017](0017-telegram-session-read-and-continue.md) + входящее мультимодальное медиа (фото/файлы/голос → редукция-к-тексту, локальное распознавание) в [0027](0027-incoming-multimodal-media.md).
-- **Подсистема «Поиск работы».** Три ADR одной серии: [0028](0028-career-data-module.md) (данные карьеры и конструктор резюме) + [0029](0029-company-discovery-and-network-access.md) (discovery компаний, граница сети) + [0030](0030-jobsearch-funnel-reporting.md) (воронка, метрики, дашборд). Единый язык и решения владельца D1–D11 — [docs/jobsearch-domain-glossary.md](../jobsearch-domain-glossary.md); ADR фиксируют схему, глоссарий — язык.
+- **Подсистема «Поиск работы».** Ядро — три ADR одной серии: [0028](0028-career-data-module.md) (данные карьеры и конструктор резюме) + [0029](0029-company-discovery-and-network-access.md) (discovery компаний, граница сети) + [0030](0030-jobsearch-funnel-reporting.md) (воронка, метрики, дашборд); каналы добычи расширяются отдельными решениями — [0031](0031-hh-channel.md) (hh.ru). Единый язык и решения владельца D1–D11 — [docs/jobsearch-domain-glossary.md](../jobsearch-domain-glossary.md); ADR фиксируют схему, глоссарий — язык.
 - **Фильтрация и приватность.** [0011](0011-relevance-sensitivity-filter.md) (чувствительность on-device до облака + релевантность на compile + лейн задач) опирается на границу двух репо [0003](0003-two-repos-public-private.md) (приватные лексиконы/карантин — только в приватном репо) и no-embedder/no-cloud-vector [0002](0002-no-embedder-pure-karpathy.md) (Tier-1 детерминированный, без ML; Tier-2 ML — отложен).
 
 ## Связанные
